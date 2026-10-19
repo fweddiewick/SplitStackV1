@@ -208,14 +208,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setPaymentMethods(cloudData.paymentMethods);
         cloudHasData = true;
       }
-      if (cloudData.expenses) {
+      if (cloudData.expenses && cloudData.expenses.length > 0) {
         setExpenses(cloudData.expenses);
         cloudHasData = true;
       }
 
-      // If cloud has tables but no records yet, seed with CURRENT local state so any progress already made on desktop/phone is preserved in cloud
+      // If cloud has tables but NO records at all yet, seed with CURRENT local state so any progress already made on desktop/phone is preserved in cloud
       if (!cloudHasData) {
-        await seedInitialDataToSupabase(members, paymentMethods, expenses);
+        let currentMembers = members;
+        let currentMethods = paymentMethods;
+        let currentExpenses = expenses;
+        try {
+          const m = localStorage.getItem(STORAGE_KEY_MEMBERS);
+          if (m) currentMembers = JSON.parse(m);
+          const c = localStorage.getItem(STORAGE_KEY_METHODS);
+          if (c) currentMethods = JSON.parse(c);
+          const e = localStorage.getItem(STORAGE_KEY_EXPENSES);
+          if (e) currentExpenses = JSON.parse(e);
+        } catch {
+          // ignore
+        }
+        await seedInitialDataToSupabase(currentMembers, currentMethods, currentExpenses);
       }
 
       setIsCloudSynced(true);

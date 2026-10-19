@@ -16,7 +16,30 @@ function cleanCredential(val: unknown): string {
  * Retrieve current Supabase credentials from Vite/Vercel env vars or LocalStorage override
  */
 export function getSupabaseCredentials(): { url: string; key: string; source: 'env' | 'localStorage' | 'none' } {
-  // Check env vars first
+  // 1. Check URL parameters (e.g. from QR code scan or mobile share link)
+  if (typeof window !== 'undefined' && window.location) {
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const qUrl = cleanCredential(searchParams.get('supabase_url') || hashParams.get('supabase_url'));
+      const qKey = cleanCredential(searchParams.get('supabase_key') || hashParams.get('supabase_key'));
+      if (qUrl && qKey && (qUrl.startsWith('https://') || qUrl.startsWith('http://')) && qKey.length > 20) {
+        localStorage.setItem(STORAGE_KEY_CUSTOM_SUPABASE_URL, qUrl);
+        localStorage.setItem(STORAGE_KEY_CUSTOM_SUPABASE_KEY, qKey);
+        // Clean URL so secrets are not displayed in browser history / address bar
+        const newUrl = new URL(window.location.href);
+        newUrl.searchParams.delete('supabase_url');
+        newUrl.searchParams.delete('supabase_key');
+        newUrl.hash = '';
+        window.history.replaceState({}, document.title, newUrl.pathname + (newUrl.search ? newUrl.search : ''));
+        return { url: qUrl, key: qKey, source: 'localStorage' };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 2. Check env vars
   const envUrl = cleanCredential(
     import.meta.env.VITE_SUPABASE_URL ||
     import.meta.env.NEXT_PUBLIC_SUPABASE_URL ||
@@ -32,7 +55,7 @@ export function getSupabaseCredentials(): { url: string; key: string; source: 'e
     return { url: envUrl, key: envKey, source: 'env' };
   }
 
-  // Check LocalStorage override
+  // 3. Check LocalStorage override
   try {
     const localUrl = cleanCredential(localStorage.getItem(STORAGE_KEY_CUSTOM_SUPABASE_URL));
     const localKey = cleanCredential(localStorage.getItem(STORAGE_KEY_CUSTOM_SUPABASE_KEY));
@@ -175,9 +198,9 @@ export async function testSupabaseConnection(): Promise<SupabaseDiagnosticResult
 
   try {
     const [mRes, cRes, eRes] = await Promise.all([
-      client.from('household_members').select('*', { count: 'exact', head: true }),
-      client.from('payment_methods').select('*', { count: 'exact', head: true }),
-      client.from('household_expenses').select('*', { count: 'exact', head: true }),
+      client.from('household_members').select('id', { count: 'exact' }).limit(1),
+      client.from('payment_methods').select('id', { count: 'exact' }).limit(1),
+      client.from('household_expenses').select('id', { count: 'exact' }).limit(1),
     ]);
 
     let anySuccess = false;
