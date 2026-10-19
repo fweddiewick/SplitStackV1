@@ -16,6 +16,8 @@ export const Header: React.FC<HeaderProps> = ({ onOpenManageMembers }) => {
     expenses,
     members,
     showToast,
+    isCloudSynced,
+    setIsSyncModalOpen,
   } = useApp();
   const [showMonthDropdown, setShowMonthDropdown] = useState(false);
   const [showMobileMenu, setShowMobileMenu] = useState(false);
@@ -183,6 +185,25 @@ export const Header: React.FC<HeaderProps> = ({ onOpenManageMembers }) => {
             </div>
           </button>
 
+          {/* Cloud Database Sync Status Indicator & Trigger */}
+          <button
+            onClick={() => setIsSyncModalOpen(true)}
+            className={`p-1 border-2 border-[#264D59] shadow-[1.5px_1.5px_0px_#264D59] flex items-center justify-center transition-colors cursor-pointer ${
+              isCloudSynced
+                ? 'bg-[#43978D]/25 text-[#264D59] hover:bg-[#43978D]/40'
+                : 'bg-[#D46C4E]/20 text-[#D46C4E] hover:bg-[#D46C4E]/30 animate-pulse'
+            }`}
+            title={
+              isCloudSynced
+                ? 'Cloud Database Synced (Click for Diagnostics)'
+                : 'Cloud Sync Offline (Click to configure & sync)'
+            }
+          >
+            <span className="material-symbols-outlined text-base">
+              {isCloudSynced ? 'cloud_done' : 'cloud_off'}
+            </span>
+          </button>
+
           {/* Mobile Navigation Toggle */}
           <button
             onClick={() => setShowMobileMenu(!showMobileMenu)}
@@ -225,6 +246,23 @@ export const Header: React.FC<HeaderProps> = ({ onOpenManageMembers }) => {
           >
             <span>Manage Household Members ({members.length})</span>
             <span className="material-symbols-outlined text-sm">group</span>
+          </button>
+          <button
+            onClick={() => {
+              setShowMobileMenu(false);
+              setIsSyncModalOpen(true);
+            }}
+            className="w-full text-left p-2 font-headline font-bold text-xs uppercase border-2 border-[#264D59] bg-[#F0EEE8] text-[#264D59] flex items-center justify-between"
+          >
+            <span className="flex items-center gap-1.5">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isCloudSynced ? 'bg-[#43978D]' : 'bg-[#D46C4E]'
+                }`}
+              ></span>
+              <span>Cross-Device Cloud Sync</span>
+            </span>
+            <span className="material-symbols-outlined text-sm">cloud_sync</span>
           </button>
         </div>
       )}

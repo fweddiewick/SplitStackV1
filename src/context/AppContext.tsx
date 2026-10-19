@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import {
   HouseholdMember,
   CardMethod,
@@ -17,9 +17,12 @@ import { executeRecommendCard } from '../mcp/tools';
 import { getExpenseMonthKey, isExpenseInMonth, getAvailableMonths } from '../utils/dateUtils';
 import {
   isSupabaseConfigured,
-  supabase,
+  getSupabaseClient,
+  checkIsConfigured,
+  getSupabaseCredentials,
   fetchHouseholdData,
   seedInitialDataToSupabase,
+  pushAllLocalDataToSupabase,
   saveExpenseToSupabase,
   deleteExpenseFromSupabase,
   clearExpensesFromSupabase,
@@ -37,6 +40,11 @@ interface AppContextType {
   setSelectedMonth: (month: string) => void;
   availableMonths: string[];
   isCloudSynced: boolean;
+  syncStatusDetails: string;
+  isSyncModalOpen: boolean;
+  setIsSyncModalOpen: (open: boolean) => void;
+  refreshCloudData: () => Promise<void>;
+  pushLocalDataToCloud: () => Promise<boolean>;
   members: HouseholdMember[];
   addMember: (name: string, role?: 'lead' | 'member', phone?: string) => HouseholdMember;
   updateMember: (id: string, updates: Partial<HouseholdMember>) => void;
@@ -164,91 +172,160 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   // Track if cloud database is actively connected
-  const [isCloudSynced, setIsCloudSynced] = useState<boolean>(isSupabaseConfigured);
+  const [isCloudSynced, setIsCloudSynced] = useState<boolean>(false);
+  const [syncStatusDetails, setSyncStatusDetails] = useState<string>('Initializing cross-device sync...');
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState<boolean>(false);
 
   // Cross-device synchronization via Supabase
+  const refreshCloudData = useCallback(async () => {
+    if (!checkIsConfigured()) {
+      setIsCloudSynced(false);
+      setSyncStatusDetails('Local Storage Mode • Supabase Not Configured');
+      return;
+    }
+
+    try {
+      const cloudData = await fetchHouseholdData();
+
+      if (cloudData.tablesMissing) {
+        setIsCloudSynced(false);
+        setSyncStatusDetails('Tables Missing in Supabase • Run schema.sql');
+        return;
+      }
+
+      if (!cloudData.success) {
+        setIsCloudSynced(false);
+        setSyncStatusDetails(`Connection Error: ${cloudData.error || 'Unknown'}`);
+        return;
+      }
+
+      let cloudHasData = false;
+      if (cloudData.members && cloudData.members.length > 0) {
+        setMembers(cloudData.members);
+        cloudHasData = true;
+      }
+      if (cloudData.paymentMethods && cloudData.paymentMethods.length > 0) {
+        setPaymentMethods(cloudData.paymentMethods);
+        cloudHasData = true;
+      }
+      if (cloudData.expenses) {
+        setExpenses(cloudData.expenses);
+        cloudHasData = true;
+      }
+
+      // If cloud has tables but no records yet, seed with CURRENT local state so any progress already made on desktop/phone is preserved in cloud
+      if (!cloudHasData) {
+        await seedInitialDataToSupabase(members, paymentMethods, expenses);
+      }
+
+      setIsCloudSynced(true);
+      setSyncStatusDetails('Cloud Database Connected • Desktop & Mobile Synced');
+    } catch (err: any) {
+      console.warn('Supabase fetch failed:', err);
+      setIsCloudSynced(false);
+      setSyncStatusDetails('Sync Offline • Using Local Data');
+    }
+  }, [members, paymentMethods, expenses]);
+
+  // Push local data to cloud
+  const pushLocalDataToCloud = async (): Promise<boolean> => {
+    const res = await pushAllLocalDataToSupabase(members, paymentMethods, expenses);
+    if (res.success) {
+      setIsCloudSynced(true);
+      setSyncStatusDetails('Local Ledger Pushed to Cloud');
+      showToast(`Synced ${expenses.length} expenses to Supabase!`, 'cloud_upload');
+      return true;
+    } else {
+      showToast(`Push failed: ${res.error}`, 'error');
+      return false;
+    }
+  };
+
   useEffect(() => {
-    if (!isSupabaseConfigured) return;
-
     let isMounted = true;
+    let channel: any = null;
 
-    async function loadCloudData() {
+    async function initSync() {
+      await refreshCloudData();
+
+      const client = getSupabaseClient();
+      if (!client || !checkIsConfigured()) return;
+
       try {
-        const cloudData = await fetchHouseholdData();
-        if (!isMounted) return;
-
-        let hasData = false;
-        if (cloudData.members && cloudData.members.length > 0) {
-          setMembers(cloudData.members);
-          hasData = true;
-        }
-        if (cloudData.paymentMethods && cloudData.paymentMethods.length > 0) {
-          setPaymentMethods(cloudData.paymentMethods);
-          hasData = true;
-        }
-        if (cloudData.expenses && cloudData.expenses.length > 0) {
-          setExpenses(cloudData.expenses);
-          hasData = true;
-        }
-
-        // If cloud tables are empty, seed them so all devices (mobile & desktop) share initial baseline
-        if (!hasData) {
-          await seedInitialDataToSupabase(INITIAL_MEMBERS, INITIAL_PAYMENT_METHODS, INITIAL_EXPENSES);
-        }
-
-        setIsCloudSynced(true);
-      } catch (err) {
-        console.warn('Supabase initial fetch failed, using local storage:', err);
+        channel = client
+          .channel('splitstack-realtime')
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'household_expenses' },
+            async () => {
+              const res = await fetchHouseholdData();
+              if (isMounted && res.success && res.expenses) {
+                setExpenses(res.expenses);
+              }
+            }
+          )
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'payment_methods' },
+            async () => {
+              const res = await fetchHouseholdData();
+              if (isMounted && res.success && res.paymentMethods) {
+                setPaymentMethods(res.paymentMethods);
+              }
+            }
+          )
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'household_members' },
+            async () => {
+              const res = await fetchHouseholdData();
+              if (isMounted && res.success && res.members) {
+                setMembers(res.members);
+              }
+            }
+          )
+          .subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+              setIsCloudSynced(true);
+              setSyncStatusDetails('Supabase Real-Time Active');
+            } else if (status === 'CHANNEL_ERROR') {
+              console.warn('Supabase realtime channel disconnected, polling enabled.');
+            }
+          });
+      } catch (e) {
+        console.warn('Realtime channel subscription error:', e);
       }
     }
 
-    loadCloudData();
+    initSync();
 
-    // Setup Realtime listener: instant updates when either phone or desktop modifies data
-    if (supabase) {
-      const channel = supabase
-        .channel('household-realtime')
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'household_expenses' },
-          async () => {
-            const data = await fetchHouseholdData();
-            if (isMounted && data.expenses) {
-              setExpenses(data.expenses);
-            }
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'payment_methods' },
-          async () => {
-            const data = await fetchHouseholdData();
-            if (isMounted && data.paymentMethods) {
-              setPaymentMethods(data.paymentMethods);
-            }
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'household_members' },
-          async () => {
-            const data = await fetchHouseholdData();
-            if (isMounted && data.members) {
-              setMembers(data.members);
-            }
-          }
-        )
-        .subscribe();
+    // Mobile / Browser visibility & focus listeners:
+    // When user unlocks phone or switches back to tab, immediately re-fetch cloud data!
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshCloudData();
+      }
+    };
+    const handleFocus = () => {
+      refreshCloudData();
+    };
+    const handleOnline = () => {
+      refreshCloudData();
+    };
 
-      const client = supabase;
-      return () => {
-        isMounted = false;
-        client?.removeChannel(channel);
-      };
-    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('online', handleOnline);
 
     return () => {
       isMounted = false;
+      if (channel) {
+        const client = getSupabaseClient();
+        client?.removeChannel(channel);
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('online', handleOnline);
     };
   }, []);
 
@@ -907,6 +984,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setSelectedMonth,
         availableMonths,
         isCloudSynced,
+        syncStatusDetails,
+        isSyncModalOpen,
+        setIsSyncModalOpen,
+        refreshCloudData,
+        pushLocalDataToCloud,
         members,
         addMember,
         updateMember,

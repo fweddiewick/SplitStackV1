@@ -10,9 +10,10 @@ import { CardStrategyView } from './components/CardStrategyView';
 import { PaymentMethodsView } from './components/PaymentMethodsView';
 import { ConfigureCardModal } from './components/ConfigureCardModal';
 import { ManageMembersModal } from './components/ManageMembersModal';
+import { DatabaseSyncModal } from './components/DatabaseSyncModal';
 
 const MainAppContent: React.FC = () => {
-  const { activeTab } = useApp();
+  const { activeTab, isSyncModalOpen, setIsSyncModalOpen } = useApp();
 
   // Modals state
   const [configureCardModal, setConfigureCardModal] = useState<{ isOpen: boolean; cardId?: string }>({
@@ -70,6 +71,12 @@ const MainAppContent: React.FC = () => {
       <ManageMembersModal
         isOpen={isManageMembersOpen}
         onClose={() => setIsManageMembersOpen(false)}
+      />
+
+      {/* Cross-Device Database Sync & Diagnostics Modal */}
+      <DatabaseSyncModal
+        isOpen={isSyncModalOpen}
+        onClose={() => setIsSyncModalOpen(false)}
       />
     </div>
   );

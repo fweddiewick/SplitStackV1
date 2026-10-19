@@ -1,6 +1,11 @@
 -- ==============================================================================
--- SplitStack SG: Supabase Complete Database Schema & Cross-Device Sync
--- Run this script in your Supabase Project SQL Editor (https://supabase.com/dashboard/project/_/sql)
+-- SplitStack SG: Supabase Complete Database Schema & Cross-Device Real-Time Sync
+--
+-- HOW TO RUN THIS SCRIPT:
+-- 1. Go to your Supabase Project Dashboard: https://supabase.com/dashboard/project/_/sql
+-- 2. Click "New Query", paste this entire SQL script, and click "RUN".
+-- 3. In 2 seconds, all 3 tables, permissive RLS policies, indexes, and Realtime publications
+--    will be created. Your phone and desktop will immediately sync!
 -- ==============================================================================
 
 -- 1. Household Members Table
@@ -20,7 +25,7 @@ DROP POLICY IF EXISTS "Allow public read access for household_members" ON public
 CREATE POLICY "Allow public read access for household_members" ON public.household_members FOR SELECT USING (true);
 
 DROP POLICY IF EXISTS "Allow public write access for household_members" ON public.household_members;
-CREATE POLICY "Allow public write access for household_members" ON public.household_members FOR ALL USING (true);
+CREATE POLICY "Allow public write access for household_members" ON public.household_members FOR ALL USING (true) WITH CHECK (true);
 
 
 -- 2. Payment Methods & Cards Table
@@ -67,7 +72,7 @@ DROP POLICY IF EXISTS "Allow public read access for payment_methods" ON public.p
 CREATE POLICY "Allow public read access for payment_methods" ON public.payment_methods FOR SELECT USING (true);
 
 DROP POLICY IF EXISTS "Allow public write access for payment_methods" ON public.payment_methods;
-CREATE POLICY "Allow public write access for payment_methods" ON public.payment_methods FOR ALL USING (true);
+CREATE POLICY "Allow public write access for payment_methods" ON public.payment_methods FOR ALL USING (true) WITH CHECK (true);
 
 
 -- 3. Household Expenses Ledger Table
@@ -100,7 +105,7 @@ DROP POLICY IF EXISTS "Allow public read access for household_expenses" ON publi
 CREATE POLICY "Allow public read access for household_expenses" ON public.household_expenses FOR SELECT USING (true);
 
 DROP POLICY IF EXISTS "Allow public write access for household_expenses" ON public.household_expenses;
-CREATE POLICY "Allow public write access for household_expenses" ON public.household_expenses FOR ALL USING (true);
+CREATE POLICY "Allow public write access for household_expenses" ON public.household_expenses FOR ALL USING (true) WITH CHECK (true);
 
 CREATE INDEX IF NOT EXISTS idx_expenses_iso_date ON public.household_expenses(iso_date);
 CREATE INDEX IF NOT EXISTS idx_expenses_payer ON public.household_expenses(payer_id);
@@ -108,10 +113,20 @@ CREATE INDEX IF NOT EXISTS idx_expenses_card ON public.household_expenses(paymen
 
 
 -- 4. Enable Supabase Realtime for instant phone-to-desktop synchronization
-BEGIN;
-  DROP PUBLICATION IF EXISTS supabase_realtime;
-  CREATE PUBLICATION supabase_realtime;
-COMMIT;
+-- Replica identity ensures full rows are transmitted during UPDATE/DELETE
+ALTER TABLE public.household_members REPLICA IDENTITY FULL;
+ALTER TABLE public.payment_methods REPLICA IDENTITY FULL;
+ALTER TABLE public.household_expenses REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime'
+  ) THEN
+    CREATE PUBLICATION supabase_realtime;
+  END IF;
+END $$;
+
 ALTER PUBLICATION supabase_realtime ADD TABLE public.household_members;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.payment_methods;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.household_expenses;
