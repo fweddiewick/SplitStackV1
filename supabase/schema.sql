@@ -1,98 +1,117 @@
 -- ==============================================================================
--- SplitStack SG: Supabase Database Schema
--- Table: card_rules
--- Stores credit card rules, earning rates, spend caps, and eligible MCC arrays
+-- SplitStack SG: Supabase Complete Database Schema & Cross-Device Sync
+-- Run this script in your Supabase Project SQL Editor (https://supabase.com/dashboard/project/_/sql)
 -- ==============================================================================
 
--- 1. Create table
-CREATE TABLE IF NOT EXISTS public.card_rules (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    card_name VARCHAR(100) NOT NULL,
-    bank VARCHAR(60) NOT NULL,
-    owner VARCHAR(60) NOT NULL DEFAULT 'Ryan Tan',
-    base_earn_rate VARCHAR(50) NOT NULL DEFAULT '0.4 MPD',
-    bonus_earn_rate VARCHAR(50) NOT NULL DEFAULT '4.0 MPD',
-    monthly_cap NUMERIC(10, 2) NOT NULL DEFAULT 1000.00,
-    rounding_rule VARCHAR(20) NOT NULL DEFAULT '5_sgd_block' CHECK (rounding_rule IN ('5_sgd_block', '1_sgd_block', 'exact')),
-    eligible_mccs JSONB NOT NULL DEFAULT '[]'::jsonb,
-    key_exclusions TEXT[] DEFAULT ARRAY['tax', 'hospital', 'insurance', 'utilities'],
-    billing_cycle_type VARCHAR(20) NOT NULL DEFAULT 'calendar' CHECK (billing_cycle_type IN ('calendar', 'statement')),
-    is_active BOOLEAN NOT NULL DEFAULT true,
+-- 1. Household Members Table
+CREATE TABLE IF NOT EXISTS public.household_members (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    phone TEXT,
+    avatar_url TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
--- 2. Indexes for fast query lookup
-CREATE INDEX IF NOT EXISTS idx_card_rules_owner ON public.card_rules(owner);
-CREATE INDEX IF NOT EXISTS idx_card_rules_mccs ON public.card_rules USING gin(eligible_mccs);
+ALTER TABLE public.household_members ENABLE ROW LEVEL SECURITY;
 
--- 3. Row Level Security (RLS) policies
-ALTER TABLE public.card_rules ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow public read access for household_members" ON public.household_members;
+CREATE POLICY "Allow public read access for household_members" ON public.household_members FOR SELECT USING (true);
 
-CREATE POLICY "Allow public read access for household members" 
-    ON public.card_rules FOR SELECT 
-    USING (true);
+DROP POLICY IF EXISTS "Allow public write access for household_members" ON public.household_members;
+CREATE POLICY "Allow public write access for household_members" ON public.household_members FOR ALL USING (true);
 
-CREATE POLICY "Allow authenticated household write access" 
-    ON public.card_rules FOR ALL 
-    USING (true);
 
--- 4. Initial Seed Data matching Singapore card market rules
-INSERT INTO public.card_rules (card_name, bank, owner, base_earn_rate, bonus_earn_rate, monthly_cap, rounding_rule, eligible_mccs, key_exclusions)
-VALUES 
-    (
-        'UOB One Card',
-        'UOB',
-        'Ryan Tan',
-        '0.05% Cashback',
-        '5.0% Cashback (Tier 2)',
-        2000.00,
-        '5_sgd_block',
-        '["5411", "4900", "4814", "5814"]'::jsonb,
-        ARRAY['tax', 'hospital', 'insurance']
-    ),
-    (
-        'Citi Rewards + Amaze',
-        'Citibank + Instarem',
-        'Ryan Tan',
-        '0.4 MPD',
-        '4.0 MPD (10X Points)',
-        1000.00,
-        '1_sgd_block',
-        '["5311", "5651", "5691", "5814", "5941", "5942", "5944"]'::jsonb,
-        ARRAY['airlines', 'utilities', 'travel']
-    ),
-    (
-        'HSBC Revolution',
-        'HSBC',
-        'Sarah Chen',
-        '0.4 MPD',
-        '4.0 MPD (10X Points)',
-        1000.00,
-        '1_sgd_block',
-        '["5411", "5812", "5814", "5813", "5912"]'::jsonb,
-        ARRAY['tax', 'school_fees']
-    ),
-    (
-        'DBS Woman''s World',
-        'DBS Bank',
-        'Ken Lim',
-        '0.4 MPD',
-        '4.0 MPD (10X DBS Points)',
-        1500.00,
-        '5_sgd_block',
-        '["5311", "5411", "5651", "5712", "5814", "5815", "4511"]'::jsonb,
-        ARRAY['crypto', 'gambling']
-    ),
-    (
-        'DBS Altitude Visa',
-        'DBS Bank',
-        'Ryan Tan',
-        '1.3 MPD',
-        '2.2 MPD (Overseas FCY)',
-        0.00,
-        '5_sgd_block',
-        '[]'::jsonb,
-        ARRAY[]::text[]
-    )
-ON CONFLICT (id) DO NOTHING;
+-- 2. Payment Methods & Cards Table
+CREATE TABLE IF NOT EXISTS public.payment_methods (
+    id TEXT PRIMARY KEY,
+    badge_code TEXT,
+    name TEXT NOT NULL,
+    bank TEXT,
+    member_id TEXT,
+    type TEXT NOT NULL DEFAULT 'credit',
+    network TEXT NOT NULL DEFAULT 'Visa',
+    last4 TEXT,
+    status_tag TEXT DEFAULT 'Open Buffer',
+    status_tag_bg TEXT DEFAULT '#43978D',
+    card_subtitle TEXT,
+    billing_cycle_type TEXT DEFAULT 'calendar',
+    billing_cycle_desc TEXT,
+    current_spend NUMERIC(10, 2) DEFAULT 0.00,
+    bonus_cap NUMERIC(10, 2) DEFAULT 1000.00,
+    min_spend_target NUMERIC(10, 2),
+    txn_target_req TEXT,
+    max_rebate_desc TEXT,
+    base_rate TEXT DEFAULT '0.4 MPD',
+    bonus_rate TEXT DEFAULT '4.0 MPD',
+    rounding_block INTEGER DEFAULT 1,
+    key_exclusions TEXT,
+    eligible_modes TEXT,
+    overflow_rate TEXT,
+    points_expiry TEXT,
+    overseas_rate TEXT,
+    extra_benefit TEXT,
+    footer_advice TEXT,
+    footer_icon TEXT DEFAULT 'credit_card',
+    footer_type TEXT DEFAULT 'success',
+    eligible_categories JSONB DEFAULT '[]'::jsonb,
+    is_default_payer BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+ALTER TABLE public.payment_methods ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public read access for payment_methods" ON public.payment_methods;
+CREATE POLICY "Allow public read access for payment_methods" ON public.payment_methods FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Allow public write access for payment_methods" ON public.payment_methods;
+CREATE POLICY "Allow public write access for payment_methods" ON public.payment_methods FOR ALL USING (true);
+
+
+-- 3. Household Expenses Ledger Table
+CREATE TABLE IF NOT EXISTS public.household_expenses (
+    id TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    iso_date TEXT NOT NULL,
+    merchant TEXT NOT NULL,
+    mcc TEXT NOT NULL DEFAULT '5411',
+    category TEXT NOT NULL DEFAULT 'General',
+    tags JSONB DEFAULT '[]'::jsonb,
+    amount NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+    payer_id TEXT NOT NULL,
+    payment_method_id TEXT NOT NULL,
+    split_mode TEXT NOT NULL DEFAULT 'equal',
+    split_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
+    custom_weights JSONB,
+    pair_member_ids JSONB,
+    notes TEXT,
+    settled BOOLEAN NOT NULL DEFAULT false,
+    eligible_blocks_amount NUMERIC(10, 2) DEFAULT 0.00,
+    reward_estimated TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+ALTER TABLE public.household_expenses ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public read access for household_expenses" ON public.household_expenses;
+CREATE POLICY "Allow public read access for household_expenses" ON public.household_expenses FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Allow public write access for household_expenses" ON public.household_expenses;
+CREATE POLICY "Allow public write access for household_expenses" ON public.household_expenses FOR ALL USING (true);
+
+CREATE INDEX IF NOT EXISTS idx_expenses_iso_date ON public.household_expenses(iso_date);
+CREATE INDEX IF NOT EXISTS idx_expenses_payer ON public.household_expenses(payer_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_card ON public.household_expenses(payment_method_id);
+
+
+-- 4. Enable Supabase Realtime for instant phone-to-desktop synchronization
+BEGIN;
+  DROP PUBLICATION IF EXISTS supabase_realtime;
+  CREATE PUBLICATION supabase_realtime;
+COMMIT;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.household_members;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.payment_methods;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.household_expenses;

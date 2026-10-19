@@ -15,6 +15,20 @@ import {
 } from '../data/initialData';
 import { executeRecommendCard } from '../mcp/tools';
 import { getExpenseMonthKey, isExpenseInMonth, getAvailableMonths } from '../utils/dateUtils';
+import {
+  isSupabaseConfigured,
+  supabase,
+  fetchHouseholdData,
+  seedInitialDataToSupabase,
+  saveExpenseToSupabase,
+  deleteExpenseFromSupabase,
+  clearExpensesFromSupabase,
+  updateExpensesSettledInSupabase,
+  savePaymentMethodToSupabase,
+  deletePaymentMethodFromSupabase,
+  saveMemberToSupabase,
+  deleteMemberFromSupabase,
+} from '../services/supabase';
 
 interface AppContextType {
   activeTab: TabType;
@@ -22,6 +36,7 @@ interface AppContextType {
   selectedMonth: string;
   setSelectedMonth: (month: string) => void;
   availableMonths: string[];
+  isCloudSynced: boolean;
   members: HouseholdMember[];
   addMember: (name: string, role?: 'lead' | 'member', phone?: string) => HouseholdMember;
   updateMember: (id: string, updates: Partial<HouseholdMember>) => void;
@@ -148,6 +163,95 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return initMonths.length > 0 ? initMonths[0] : 'Oct 2024';
   });
 
+  // Track if cloud database is actively connected
+  const [isCloudSynced, setIsCloudSynced] = useState<boolean>(isSupabaseConfigured);
+
+  // Cross-device synchronization via Supabase
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
+    let isMounted = true;
+
+    async function loadCloudData() {
+      try {
+        const cloudData = await fetchHouseholdData();
+        if (!isMounted) return;
+
+        let hasData = false;
+        if (cloudData.members && cloudData.members.length > 0) {
+          setMembers(cloudData.members);
+          hasData = true;
+        }
+        if (cloudData.paymentMethods && cloudData.paymentMethods.length > 0) {
+          setPaymentMethods(cloudData.paymentMethods);
+          hasData = true;
+        }
+        if (cloudData.expenses && cloudData.expenses.length > 0) {
+          setExpenses(cloudData.expenses);
+          hasData = true;
+        }
+
+        // If cloud tables are empty, seed them so all devices (mobile & desktop) share initial baseline
+        if (!hasData) {
+          await seedInitialDataToSupabase(INITIAL_MEMBERS, INITIAL_PAYMENT_METHODS, INITIAL_EXPENSES);
+        }
+
+        setIsCloudSynced(true);
+      } catch (err) {
+        console.warn('Supabase initial fetch failed, using local storage:', err);
+      }
+    }
+
+    loadCloudData();
+
+    // Setup Realtime listener: instant updates when either phone or desktop modifies data
+    if (supabase) {
+      const channel = supabase
+        .channel('household-realtime')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'household_expenses' },
+          async () => {
+            const data = await fetchHouseholdData();
+            if (isMounted && data.expenses) {
+              setExpenses(data.expenses);
+            }
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'payment_methods' },
+          async () => {
+            const data = await fetchHouseholdData();
+            if (isMounted && data.paymentMethods) {
+              setPaymentMethods(data.paymentMethods);
+            }
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'household_members' },
+          async () => {
+            const data = await fetchHouseholdData();
+            if (isMounted && data.members) {
+              setMembers(data.members);
+            }
+          }
+        )
+        .subscribe();
+
+      const client = supabase;
+      return () => {
+        isMounted = false;
+        client?.removeChannel(channel);
+      };
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   // Keep selectedMonth aligned with availableMonths:
   // If the active month was cleared or has no expenses, fall back to newest available month or empty
   useEffect(() => {
@@ -205,13 +309,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       phone,
     };
     setMembers((prev) => [...prev, newMember]);
+    saveMemberToSupabase(newMember);
     showToast(`Added ${name} to household!`, 'person_add');
     return newMember;
   };
 
   const updateMember = (id: string, updates: Partial<HouseholdMember>) => {
     setMembers((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, ...updates } : m))
+      prev.map((m) => {
+        if (m.id === id) {
+          const updated = { ...m, ...updates };
+          saveMemberToSupabase(updated);
+          return updated;
+        }
+        return m;
+      })
     );
     showToast(`Updated member details.`);
   };
@@ -223,15 +335,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     const target = members.find((m) => m.id === id);
     setMembers((prev) => prev.filter((m) => m.id !== id));
+    deleteMemberFromSupabase(id);
     showToast(`Removed ${target?.name || 'member'} from household.`, 'delete');
   };
 
   const setLeadMember = (id: string) => {
     setMembers((prev) =>
-      prev.map((m) => ({
-        ...m,
-        role: m.id === id ? 'lead' : 'member',
-      }))
+      prev.map((m) => {
+        const isLead = m.id === id;
+        const updated = { ...m, role: (isLead ? 'lead' : 'member') as 'lead' | 'member' };
+        saveMemberToSupabase(updated);
+        return updated;
+      })
     );
     const chosen = members.find((m) => m.id === id);
     showToast(`${chosen?.name} is now the Lead Payer!`, 'star');
@@ -459,6 +574,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newMonth = getExpenseMonthKey(newExpense);
     setExpenses((prev) => [newExpense, ...prev]);
 
+    // Save to cloud database for cross-device sync
+    saveExpenseToSupabase(newExpense);
+
     // Automatically switch to the newly logged transaction's month so it appears in the dropdown & views
     if (newMonth && newMonth !== selectedMonth) {
       setSelectedMonth(newMonth);
@@ -475,6 +593,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const remainingExpenses = expenses.filter((e) => e.id !== id);
     setExpenses(remainingExpenses);
+
+    // Delete from cloud database
+    deleteExpenseFromSupabase(id);
 
     const remainingMonths = getAvailableMonths(remainingExpenses);
     if (remainingMonths.length > 0) {
@@ -500,6 +621,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setExpenses(toKeep);
+
+    // Delete cleared month records from cloud database
+    clearExpensesFromSupabase(toRemove.map((e) => e.id));
 
     // If we just removed all expenses for the selected month, update selectedMonth to the next available month
     const remainingMonths = getAvailableMonths(toKeep);
@@ -527,11 +651,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Clear All Expenses across entire ledger and reset all card limits & caps to 100%
   const clearAllExpenses = () => {
     const totalCount = expenses.length;
+    const allIds = expenses.map((e) => e.id);
     setExpenses([]);
     setSelectedMonth('');
     setPaymentMethods((prev) =>
       prev.map((card) => computeCardState(card, 0))
     );
+
+    // Delete from cloud database
+    clearExpensesFromSupabase(allIds);
+
     showToast(`Cleared all ${totalCount} expenses! All card limits & spending caps reset to 100% available.`, 'delete_sweep');
   };
 
@@ -574,27 +703,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id,
     };
     setPaymentMethods((prev) => [...prev, newMethod]);
+    savePaymentMethodToSupabase(newMethod);
     showToast(`Added ${newMethod.name} to Household!`, 'add_card');
   };
 
   const updatePaymentMethod = (id: string, updates: Partial<CardMethod>) => {
     setPaymentMethods((prev) =>
-      prev.map((card) => (card.id === id ? { ...card, ...updates } : card))
+      prev.map((card) => {
+        if (card.id === id) {
+          const updated = { ...card, ...updates };
+          savePaymentMethodToSupabase(updated);
+          return updated;
+        }
+        return card;
+      })
     );
     showToast(`Configuration updated.`);
   };
 
   const deletePaymentMethod = (id: string) => {
     setPaymentMethods((prev) => prev.filter((card) => card.id !== id));
+    deletePaymentMethodFromSupabase(id);
     showToast(`Payment method archived.`, 'delete');
   };
 
   const setDefaultPayerMethod = (id: string) => {
     setPaymentMethods((prev) =>
-      prev.map((card) => ({
-        ...card,
-        isDefaultPayer: card.id === id,
-      }))
+      prev.map((card) => {
+        const isDefault = card.id === id;
+        const updated = { ...card, isDefaultPayer: isDefault };
+        savePaymentMethodToSupabase(updated);
+        return updated;
+      })
     );
     const chosen = paymentMethods.find((c) => c.id === id);
     showToast(`${chosen?.name || 'Method'} set as Default Household Payer!`, 'star');
@@ -687,21 +827,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const markAllSettled = () => {
     setExpenses((prev) => prev.map((e) => ({ ...e, settled: true })));
+    updateExpensesSettledInSupabase(expenses.map((e) => e.id), true);
     showToast('All household balances marked as SETTLED!', 'check_circle');
   };
 
   const markDebtSettled = (fromMemberId: string, toMemberId: string) => {
+    const affectedIds: string[] = [];
     setExpenses((prev) =>
       prev.map((e) => {
         if (
           (e.payerId === toMemberId && (e.splitBreakdown[fromMemberId] || 0) > 0) ||
           (e.payerId === fromMemberId && (e.splitBreakdown[toMemberId] || 0) > 0)
         ) {
+          affectedIds.push(e.id);
           return { ...e, settled: true };
         }
         return e;
       })
     );
+    if (affectedIds.length > 0) {
+      updateExpensesSettledInSupabase(affectedIds, true);
+    }
     const fromM = members.find((m) => m.id === fromMemberId)?.name || fromMemberId;
     const toM = members.find((m) => m.id === toMemberId)?.name || toMemberId;
     showToast(`Settled balance between ${fromM} and ${toM}.`, 'verified');
@@ -760,6 +906,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         selectedMonth,
         setSelectedMonth,
         availableMonths,
+        isCloudSynced,
         members,
         addMember,
         updateMember,
