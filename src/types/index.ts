@@ -26,6 +26,8 @@ export interface CardMethod {
   cardSubtitle: string;
   billingCycleType: BillingCycleType;
   billingCycleDesc: string;
+  statementStartDay?: number; // 1 to 31. Default 1 for calendar. E.g. 15 for 15th of the month.
+  statementEndDay?: number;   // 1 to 31. Default 31 (or end of month). E.g. 14 for 14th of following month.
   currentSpend: number;
   bonusCap: number; // 0 if uncapped
   minSpendTarget?: number;

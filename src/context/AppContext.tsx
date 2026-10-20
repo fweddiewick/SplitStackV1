@@ -14,7 +14,13 @@ import {
   INITIAL_EXPENSES,
 } from '../data/initialData';
 import { executeRecommendCard } from '../mcp/tools';
-import { getExpenseMonthKey, isExpenseInMonth, getAvailableMonths } from '../utils/dateUtils';
+import {
+  getExpenseMonthKey,
+  isExpenseInMonth,
+  getAvailableMonths,
+  getCardStatementCycleWindow,
+  parseExpenseDate,
+} from '../utils/dateUtils';
 import {
   isSupabaseConfigured,
   getSupabaseClient,
@@ -121,13 +127,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return INITIAL_MEMBERS;
   });
 
-  // Payment Methods state (initializes to 11 Singapore default methods)
+  // Payment Methods state (loaded from localStorage or initial Singapore methods)
   const [paymentMethods, setPaymentMethods] = useState<CardMethod[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_METHODS);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length >= 11) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           return parsed;
         }
       }
@@ -590,12 +596,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Add Expense
-  // Helper to compute updated card limits, status tags, and advice based on spend
-  const computeCardState = (card: CardMethod, currentSpend: number): CardMethod => {
+  // Helper to compute updated card limits, status tags, and advice based on spend and statement cycle
+  const computeCardState = (card: CardMethod, currentSpend: number, referenceDate?: Date): CardMethod => {
     const roundedSpend = Number(Math.max(0, currentSpend).toFixed(2));
     const remainingHeadroom = card.bonusCap > 0 ? Math.max(0, card.bonusCap - roundedSpend) : 0;
     const isCapped = card.bonusCap > 0 && roundedSpend >= card.bonusCap;
     const isNear = card.bonusCap > 0 && !isCapped && remainingHeadroom <= 150;
+
+    // Calculate this card's specific statement cycle window and days until reset
+    const cycleWindow = getCardStatementCycleWindow(card, referenceDate);
+    const resetInDays = cycleWindow.resetInDays;
 
     let statusTag = card.statusTag;
     let statusTagBg = card.statusTagBg;
@@ -603,27 +613,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let footerIcon = card.footerIcon;
     let footerType = card.footerType;
 
+    const resetLabel = card.statementStartDay && card.statementStartDay !== 1
+      ? `resets on the ${card.statementStartDay}th in ${resetInDays}d`
+      : `resets on 1st of month in ${resetInDays}d`;
+
     if (card.bonusCap === 0) {
       statusTag = 'Uncapped';
       statusTagBg = '#E5E2DC';
+      footerAdvice = `Uncapped earner • Statement ${cycleWindow.displayRange} (${resetLabel})`;
     } else if (isCapped) {
       statusTag = 'Capped Out';
       statusTagBg = '#D46C4E';
-      footerAdvice = `Monthly bonus cap ($${card.bonusCap}) reached! Excess spend earns base rate only.`;
+      footerAdvice = `Bonus cap ($${card.bonusCap}) reached! Excess spend earns base rate. Cap ${resetLabel}.`;
       footerIcon = 'block';
       footerType = 'alert';
     } else if (isNear) {
       statusTag = 'Near Limit';
       statusTagBg = '#F9AD6A';
-      footerAdvice = `$${remainingHeadroom.toFixed(2)} buffer remaining. Pace your category spend.`;
+      footerAdvice = `$${remainingHeadroom.toFixed(2)} buffer left. Statement cycle ${cycleWindow.displayRange} (${resetLabel}).`;
       footerIcon = 'warning';
       footerType = 'warning';
     } else {
       statusTag = 'Open Buffer';
       statusTagBg = '#43978D';
       footerAdvice = roundedSpend === 0
-        ? `Full $${card.bonusCap} bonus cap available • 100% buffer reset.`
-        : `$${remainingHeadroom.toFixed(2)} buffer remaining. Prime earner for category spend.`;
+        ? `Full $${card.bonusCap} bonus cap available (100% reset) • Next statement reset in ${resetInDays}d.`
+        : `$${remainingHeadroom.toFixed(2)} headroom available • Statement ${cycleWindow.displayRange} (${resetLabel}).`;
       footerIcon = 'verified';
       footerType = 'success';
     }
@@ -631,6 +646,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return {
       ...card,
       currentSpend: roundedSpend,
+      resetInDays,
       statusTag,
       statusTagBg,
       footerAdvice,
@@ -639,16 +655,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  // Automatically keep card spend tracker, limits, and caps in 1-to-1 lockstep with the expenses log for selectedMonth.
-  // If expenses are cleared (0 remaining for this month/card), card spend resets to $0.00 and spending cap resets to 100%!
+  // Automatically keep card spend tracker, limits, and caps in 1-to-1 lockstep with the expenses log.
+  // Each card's spending cap strictly resets together with its respective statement date!
+  // E.g., if a card's statement starts on the 1st, it resets on the 1st of the month.
+  // If a card's statement starts on the 15th, only expenses within [15th of prev month - 14th of this month] count, and it resets on the 15th!
   useEffect(() => {
+    let refDate: Date = new Date();
+    if (selectedMonth) {
+      const parts = selectedMonth.split(' ');
+      const mNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const mIdx = mNames.indexOf(parts[0]);
+      const yr = parseInt(parts[1], 10);
+      if (mIdx !== -1 && !isNaN(yr)) {
+        // If current real-time month matches selectedMonth, use today's exact date so resetInDays is live; else anchor to the 15th of that month
+        const now = new Date();
+        if (now.getFullYear() === yr && now.getMonth() === mIdx) {
+          refDate = now;
+        } else {
+          refDate = new Date(yr, mIdx, 15);
+        }
+      }
+    }
+
     setPaymentMethods((prev) =>
       prev.map((card) => {
-        const matchingExpenses = selectedMonth
-          ? expenses.filter((e) => e.paymentMethodId === card.id && isExpenseInMonth(e, selectedMonth))
-          : [];
+        const cycleWindow = getCardStatementCycleWindow(card, refDate);
+        const matchingExpenses = expenses.filter((e) => {
+          if (e.paymentMethodId !== card.id) return false;
+          // When a historical month is selected, also allow matches within that calendar month for calendar cards
+          if (card.billingCycleType === 'calendar' && selectedMonth) {
+            return isExpenseInMonth(e, selectedMonth);
+          }
+          // For statement cycle cards, filter strictly by this card's active statement cycle window!
+          return cycleWindow.isWithinCycle(e);
+        });
         const monthSpend = matchingExpenses.reduce((sum, e) => sum + e.amount, 0);
-        return computeCardState(card, monthSpend);
+        return computeCardState(card, monthSpend, refDate);
       })
     );
   }, [selectedMonth, expenses]);
@@ -754,26 +796,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Cleared all ${totalCount} expenses! All card limits & spending caps reset to 100% available.`, 'delete_sweep');
   };
 
-  // Match and sync card spend tracker with the expenses log
+  // Match and sync card spend tracker with the expenses log according to each card's statement cycle
   const syncCardSpendWithExpenses = (targetMonth?: string) => {
     const cycle = targetMonth || selectedMonth;
-    const matchingExpenses = cycle
-      ? expenses.filter((e) => isExpenseInMonth(e, cycle))
-      : [];
-    const totalSpend = matchingExpenses.reduce((sum, e) => sum + e.amount, 0);
+    let refDate: Date = new Date();
+    if (cycle) {
+      const parts = cycle.split(' ');
+      const mNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const mIdx = mNames.indexOf(parts[0]);
+      const yr = parseInt(parts[1], 10);
+      if (mIdx !== -1 && !isNaN(yr)) {
+        const now = new Date();
+        refDate = now.getFullYear() === yr && now.getMonth() === mIdx ? now : new Date(yr, mIdx, 15);
+      }
+    }
+
+    let totalMatchedCount = 0;
+    let totalSpend = 0;
 
     setPaymentMethods((prev) =>
       prev.map((card) => {
-        const cardExpenses = matchingExpenses.filter((e) => e.paymentMethodId === card.id);
+        const cycleWindow = getCardStatementCycleWindow(card, refDate);
+        const cardExpenses = expenses.filter((e) => {
+          if (e.paymentMethodId !== card.id) return false;
+          if (card.billingCycleType === 'calendar' && cycle) {
+            return isExpenseInMonth(e, cycle);
+          }
+          return cycleWindow.isWithinCycle(e);
+        });
         const spend = cardExpenses.reduce((sum, e) => sum + e.amount, 0);
-        return computeCardState(card, spend);
+        totalMatchedCount += cardExpenses.length;
+        totalSpend += spend;
+        return computeCardState(card, spend, refDate);
       })
     );
 
-    if (matchingExpenses.length === 0) {
-      showToast(`Expenses log for ${cycle || 'current cycle'} is empty: All card limits & caps reset to 100% ($0.00 spend)!`, 'restart_alt');
+    if (totalMatchedCount === 0) {
+      showToast(`Expenses log for ${cycle || 'current cycle'} has no active cycle spend: Card spending caps reset to 100%!`, 'restart_alt');
     } else {
-      showToast(`Card spend tracker matched with ${cycle} expenses log (${matchingExpenses.length} txns, $${totalSpend.toFixed(2)} total spend)!`, 'sync');
+      showToast(`Matched statement spend with log: ${totalMatchedCount} txns ($${totalSpend.toFixed(2)} total spend). Resets applied by statement dates!`, 'sync');
     }
   };
 

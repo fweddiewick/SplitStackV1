@@ -1,6 +1,8 @@
-import React, { useState, useId } from 'react';
+import React, { useState, useId, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { CardMethod, MethodType, MemberId, BillingCycleType } from '../types';
+import { lookupCardCategories, ALL_SG_CATEGORIES, CategoryOption } from '../services/cardCategoryLookup';
+import { getCardStatementCycleWindow } from '../utils/dateUtils';
 
 interface PaymentMethodsViewProps {
   onOpenAddModal: () => void;
@@ -21,6 +23,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
     resetToDefaultMethods,
     syncCardSpendWithExpenses,
     resetCardSpendTracker,
+    pushLocalDataToCloud,
     selectedMonth,
     showToast,
   } = useApp();
@@ -42,6 +45,8 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
   const [formType, setFormType] = useState<MethodType>(activeCard?.type || 'credit');
   const [formCycle, setFormCycle] = useState<BillingCycleType>(activeCard?.billingCycleType || 'calendar');
   const [formCycleDesc, setFormCycleDesc] = useState(activeCard?.billingCycleDesc || 'Calendar (1st - End of Month)');
+  const [formStartDay, setFormStartDay] = useState<number>(activeCard?.statementStartDay ?? 1);
+  const [formEndDay, setFormEndDay] = useState<number>(activeCard?.statementEndDay ?? 31);
   const [formCap, setFormCap] = useState(String(activeCard?.bonusCap || '1000'));
   const [formCurrentSpend, setFormCurrentSpend] = useState(String(activeCard?.currentSpend || '0'));
   const [formRounding, setFormRounding] = useState<number>(activeCard?.roundingBlock ?? 1);
@@ -50,13 +55,28 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
   const [formExclusions, setFormExclusions] = useState(activeCard?.keyExclusions || '');
   const [formCategories, setFormCategories] = useState<string[]>(activeCard?.eligibleCategories || ['dining', 'online_shopping']);
 
+  // Category lookup & dynamic categories state
+  const [isFetchingCategories, setIsFetchingCategories] = useState(false);
+  const [categoryFetchNotice, setCategoryFetchNotice] = useState<string | null>(null);
+  const [customCategoryInput, setCustomCategoryInput] = useState('');
+  const [availableCategories, setAvailableCategories] = useState<CategoryOption[]>(ALL_SG_CATEGORIES);
+
+  // Sync state when active card changes
+  useEffect(() => {
+    if (activeCard) {
+      handleSelectCard(activeCard);
+    }
+  }, [activeCard?.id]);
+
   const handleSelectCard = (card: CardMethod) => {
     setSelectedCardId(card.id);
     setFormName(card.name);
     setFormMember(card.memberId);
     setFormType(card.type);
     setFormCycle(card.billingCycleType);
-    setFormCycleDesc(card.billingCycleDesc || (card.billingCycleType === 'calendar' ? 'Calendar (1st - End of Month)' : 'Statement Date (TBD)'));
+    setFormCycleDesc(card.billingCycleDesc || (card.billingCycleType === 'calendar' ? 'Calendar (1st - End of Month)' : 'Statement Date (15th - 14th)'));
+    setFormStartDay(card.statementStartDay ?? (card.billingCycleType === 'statement' ? 15 : 1));
+    setFormEndDay(card.statementEndDay ?? (card.billingCycleType === 'statement' ? 14 : 31));
     setFormCap(String(card.bonusCap ?? 0));
     setFormCurrentSpend(String(card.currentSpend ?? 0));
     setFormRounding(card.roundingBlock);
@@ -64,19 +84,114 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
     setFormBonusRate(card.bonusRate);
     setFormExclusions(card.keyExclusions || '');
     setFormCategories(card.eligibleCategories || []);
+    setCategoryFetchNotice(null);
+
+    // Ensure any custom categories already on the card are represented in availableCategories
+    if (card.eligibleCategories) {
+      setAvailableCategories((prev) => {
+        const existingIds = new Set(prev.map((c) => c.id));
+        const newOnes: CategoryOption[] = [];
+        card.eligibleCategories.forEach((catId) => {
+          if (!existingIds.has(catId)) {
+            newOnes.push({
+              id: catId,
+              label: catId.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase()),
+              mccExamples: 'Custom Card Category',
+            });
+          }
+        });
+        return newOnes.length > 0 ? [...prev, ...newOnes] : prev;
+      });
+    }
   };
 
-  const handleCategoryToggle = (cat: string) => {
-    if (formCategories.includes(cat)) {
-      setFormCategories(formCategories.filter((c) => c !== cat));
+  const handleCategoryToggle = (catId: string) => {
+    if (formCategories.includes(catId)) {
+      setFormCategories(formCategories.filter((c) => c !== catId));
     } else {
-      setFormCategories([...formCategories, cat]);
+      setFormCategories([...formCategories, catId]);
     }
+  };
+
+  // Online / AI & Singapore Knowledge Base Category Lookup
+  const handleFetchOnlineCategories = async () => {
+    if (!formName.trim()) {
+      showToast('Please enter a card name to fetch categories', 'warning');
+      return;
+    }
+
+    setIsFetchingCategories(true);
+    setCategoryFetchNotice(null);
+
+    try {
+      const res = await lookupCardCategories(formName);
+
+      // Add any newly retrieved categories to available list
+      setAvailableCategories((prev) => {
+        const existingIds = new Set(prev.map((c) => c.id));
+        const toAdd = res.categories.filter((c) => !existingIds.has(c.id));
+        return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+      });
+
+      // Update formCategories with the fetched category IDs
+      const fetchedIds = res.categories.map((c) => c.id);
+      setFormCategories(fetchedIds);
+
+      // Also suggest rates if present
+      if (res.bonusRate && !formBonusRate) setFormBonusRate(res.bonusRate);
+      if (res.baseRate && !formBaseRate) setFormBaseRate(res.baseRate);
+      if (res.keyExclusions && !formExclusions) setFormExclusions(res.keyExclusions);
+
+      const notice = res.notes || `Retrieved ${res.categories.length} categories for ${res.cardName}. Review and uncheck any that do not belong.`;
+      setCategoryFetchNotice(notice);
+      showToast(`Fetched ${res.categories.length} eligible categories for ${formName}!`, 'online_prediction');
+    } catch (err: any) {
+      console.warn('Category fetch error:', err);
+      showToast('Could not fetch online categories, keeping current list.', 'warning');
+    } finally {
+      setIsFetchingCategories(false);
+    }
+  };
+
+  // Add custom category
+  const handleAddCustomCategory = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = customCategoryInput.trim();
+    if (!clean) return;
+
+    const id = clean.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    if (!availableCategories.some((c) => c.id === id)) {
+      const newOption: CategoryOption = {
+        id,
+        label: clean,
+        mccExamples: 'User Defined Custom Category',
+      };
+      setAvailableCategories((prev) => [...prev, newOption]);
+    }
+
+    if (!formCategories.includes(id)) {
+      setFormCategories((prev) => [...prev, id]);
+    }
+
+    setCustomCategoryInput('');
+    showToast(`Added custom category "${clean}"!`, 'add');
+  };
+
+  // Statement cycle presets
+  const handleApplyCyclePreset = (start: number, end: number, label: string) => {
+    setFormCycle('statement');
+    setFormStartDay(start);
+    setFormEndDay(end);
+    setFormCycleDesc(label);
+    showToast(`Cycle set: ${label} (Resets on the ${start}th)`, 'calendar_month');
   };
 
   const handleSaveConfig = (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeCard) return;
+
+    const start = formCycle === 'statement' ? Math.max(1, Math.min(31, formStartDay)) : 1;
+    const end = formCycle === 'statement' ? Math.max(1, Math.min(31, formEndDay)) : 31;
 
     updatePaymentMethod(activeCard.id, {
       name: formName,
@@ -84,6 +199,8 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
       type: formType,
       billingCycleType: formCycle,
       billingCycleDesc: formCycleDesc,
+      statementStartDay: start,
+      statementEndDay: end,
       bonusCap: parseFloat(formCap) || 0,
       currentSpend: parseFloat(formCurrentSpend) || 0,
       roundingBlock: formRounding as 5 | 1 | 0,
@@ -92,7 +209,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
       keyExclusions: formExclusions,
       eligibleCategories: formCategories,
     });
-    showToast(`Updated ${formName} rules & settings!`, 'save');
+    showToast(`Saved ${formName}! Statement reset date & categories synced across devices.`, 'save');
   };
 
   const handleSetDefault = () => {
@@ -109,7 +226,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
   };
 
   const handleDelete = (id: string, name: string) => {
-    if (confirm(`Remove ${name} from household configuration?`)) {
+    if (confirm(`Remove ${name} from household configuration and sync removal to cloud?`)) {
       deletePaymentMethod(id);
     }
   };
@@ -117,6 +234,13 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
   const filteredCards = paymentMethods.filter((c) => {
     if (filterMember === 'all') return true;
     return c.memberId === filterMember;
+  });
+
+  // Calculate live preview for current form cycle
+  const previewCycleWindow = getCardStatementCycleWindow({
+    billingCycleType: formCycle,
+    statementStartDay: formStartDay,
+    statementEndDay: formEndDay,
   });
 
   return (
@@ -129,10 +253,10 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
           </div>
           <div className="min-w-0">
             <h1 className="text-sm font-headline font-bold uppercase tracking-tight text-[#264D59] truncate">
-              PAYMENT METHODS &amp; HOUSEHOLD PAYER CONFIGURATION
+              PAYMENT METHODS &amp; STATEMENT CYCLE CONFIGURATION
             </h1>
             <p className="text-[10px] font-label font-medium uppercase tracking-wider text-[#41484b] truncate">
-              MANAGE CARDS, REWARD CAPS &amp; BILLING CYCLES • {paymentMethods.length} ACTIVE METHODS
+              CARDS SYNCED TO SUPABASE • INDEPENDENT STATEMENT RESET DATES • {paymentMethods.length} ACTIVE METHODS
             </p>
           </div>
         </div>
@@ -140,14 +264,24 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
         {/* Quick Stats & Top CTA */}
         <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
           <button
+            onClick={() => pushLocalDataToCloud()}
+            className="flex items-center gap-1 bg-[#43978D] hover:bg-[#264D59] text-white border-2 border-[#264D59] px-2 py-1 text-[11px] font-headline font-bold uppercase tracking-wider shadow-[1.5px_1.5px_0px_#264D59] transition-all"
+            title="Push local payment methods and transactions to Supabase to ensure everything is synced across devices"
+          >
+            <span className="material-symbols-outlined text-sm font-bold">cloud_upload</span>
+            <span className="hidden sm:inline">Sync Cloud</span>
+          </button>
+
+          <button
             onClick={() => syncCardSpendWithExpenses(selectedMonth)}
             className="flex items-center gap-1 bg-[#F9E07F] hover:bg-[#F9AD6A] text-[#264D59] border-2 border-[#264D59] px-2 py-1 text-[11px] font-headline font-bold uppercase tracking-wider shadow-[1.5px_1.5px_0px_#264D59] transition-all"
-            title="Recalculate and match all card spend counters with expenses logged in ledger"
+            title="Recalculate card spend counters matching their exact statement cycles from expenses log"
           >
             <span className="material-symbols-outlined text-sm font-bold">sync_alt</span>
             <span className="hidden sm:inline">Match Expenses Log</span>
             <span className="sm:hidden">Match Log</span>
           </button>
+
           <button
             onClick={() => {
               if (window.confirm('Reset all card spend counters to $0.00 and restore 100% of spending caps?')) {
@@ -160,14 +294,16 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
             <span className="material-symbols-outlined text-sm font-bold">restart_alt</span>
             <span className="hidden lg:inline">Reset Spend ($0)</span>
           </button>
+
           <button
             onClick={resetToDefaultMethods}
             className="flex items-center gap-1 bg-[#F0EEE8] hover:bg-[#F9E07F] text-[#264D59] border-2 border-[#264D59] px-2 py-1 text-[11px] font-headline font-bold uppercase tracking-wider shadow-[1.5px_1.5px_0px_#264D59] transition-all"
-            title="Restore 11 official Singapore cards (HSBC, UOB, OCBC, DBS, Citi, PayNow, Debit)"
+            title="Restore official Singapore cards templates (HSBC, UOB, OCBC, DBS, Citi, PayNow)"
           >
             <span className="material-symbols-outlined text-sm">settings_backup_restore</span>
-            <span className="hidden sm:inline">Reset 11 Defaults</span>
+            <span className="hidden sm:inline">Reset Defaults</span>
           </button>
+
           <button
             onClick={onOpenManageMembers}
             className="hidden md:flex items-center gap-1.5 bg-[#F0EEE8] hover:bg-[#F9E07F] text-[#264D59] border-2 border-[#264D59] px-2.5 py-1 text-xs font-headline font-bold uppercase tracking-wider shadow-[1.5px_1.5px_0px_#264D59] transition-all"
@@ -175,6 +311,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
             <span className="material-symbols-outlined text-sm">group</span>
             <span>Members ({members.length})</span>
           </button>
+
           <button
             onClick={onOpenAddModal}
             className="px-2.5 py-1 bg-[#F9E07F] text-[#264D59] font-headline font-bold text-[11px] uppercase tracking-wider border-2 border-[#264D59] shadow-[2px_2px_0px_#264D59] hover:bg-[#264D59] hover:text-[#F9E07F] transition-all flex items-center gap-1 active:translate-x-[1px] active:translate-y-[1px]"
@@ -185,10 +322,10 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
         </div>
       </div>
 
-      {/* 2. Two-Column Workspace (55% / 45%) */}
+      {/* 2. Two-Column Workspace (50% / 50%) */}
       <div className="flex-1 min-h-0 flex gap-2.5 overflow-hidden">
-        {/* LEFT COLUMN: CONFIGURED METHODS LIST (55% width) */}
-        <div className="w-full lg:w-[55%] flex flex-col h-full min-h-0 bg-[#FCF9F3] border-2 border-[#264D59] shadow-[3px_3px_0px_#264D59] p-2">
+        {/* LEFT COLUMN: CONFIGURED METHODS LIST (50% width) */}
+        <div className="w-full lg:w-[48%] flex flex-col h-full min-h-0 bg-[#FCF9F3] border-2 border-[#264D59] shadow-[3px_3px_0px_#264D59] p-2">
           {/* Section subhead + filter toggles */}
           <div className="shrink-0 flex items-center justify-between pb-1.5 mb-1.5 border-b-2 border-[#264D59]">
             <div className="flex items-center gap-1.5">
@@ -233,6 +370,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
             {filteredCards.map((card, idx) => {
               const isSelected = card.id === (activeCard?.id || '');
               const memberObj = members.find((m) => m.id === card.memberId);
+              const cycleWindow = getCardStatementCycleWindow(card);
 
               return (
                 <div
@@ -263,7 +401,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
 
                       {card.isDefaultPayer && (
                         <span className="text-[9px] font-label font-bold bg-[#D46C4E] text-white px-1">
-                          Active Payer
+                          Default Payer
                         </span>
                       )}
                     </div>
@@ -295,22 +433,51 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Summary Grid */}
-                  <div className="mt-1 grid grid-cols-3 gap-1.5 text-[10px] font-label bg-white/80 p-1 border border-[#264D59]/50">
-                    <div>
+                  {/* Summary Grid with Statement Cycle and Reset Days */}
+                  <div className="mt-1 grid grid-cols-12 gap-1 text-[10px] font-label bg-white/80 p-1 border border-[#264D59]/50">
+                    <div className="col-span-5 truncate">
                       <span className="text-[#41484b]">Cycle:</span>{' '}
-                      <strong className="text-[#264D59]">{card.billingCycleDesc}</strong>
-                    </div>
-                    <div>
-                      <span className="text-[#41484b]">Cap:</span>{' '}
                       <strong className="text-[#264D59]">
-                        {card.bonusCap > 0 ? `$${card.bonusCap} SGD` : 'Uncapped'}
+                        {card.billingCycleType === 'statement'
+                          ? `${card.statementStartDay || 15}th – ${card.statementEndDay || 14}th`
+                          : '1st – End of Month'}
                       </strong>
                     </div>
-                    <div className="truncate">
-                      <span className="text-[#41484b]">Rate:</span>{' '}
-                      <strong className="text-[#264D59]">{card.bonusRate}</strong>
+                    <div className="col-span-4 truncate">
+                      <span className="text-[#41484b]">Cap:</span>{' '}
+                      <strong className="text-[#264D59]">
+                        {card.bonusCap > 0 ? `$${card.bonusCap}` : 'Uncapped'}
+                      </strong>
                     </div>
+                    <div className="col-span-3 text-right">
+                      <span className={`px-1 py-0.2 font-bold text-[9px] border ${
+                        cycleWindow.resetInDays <= 3
+                          ? 'bg-[#D46C4E] text-white border-[#D46C4E]'
+                          : 'bg-[#F9E07F] text-[#264D59] border-[#264D59]'
+                      }`}>
+                        Resets in {cycleWindow.resetInDays}d
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Category Pills Preview */}
+                  <div className="mt-1 flex items-center gap-1 flex-wrap">
+                    <span className="text-[9px] font-label font-bold text-[#41484b]">
+                      Categories ({card.eligibleCategories?.length || 0}):
+                    </span>
+                    {(card.eligibleCategories || []).slice(0, 4).map((cat) => (
+                      <span
+                        key={cat}
+                        className="bg-white border border-[#264D59]/40 text-[#264D59] px-1 text-[8px] font-label uppercase truncate max-w-[90px]"
+                      >
+                        {cat.replace(/_/g, ' ')}
+                      </span>
+                    ))}
+                    {(card.eligibleCategories?.length || 0) > 4 && (
+                      <span className="text-[8px] font-label font-bold text-[#264D59]">
+                        +{(card.eligibleCategories?.length || 0) - 4} more
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -318,8 +485,8 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
           </div>
         </div>
 
-        {/* RIGHT COLUMN: RULES & CONFIGURATION EDITOR (45% width) */}
-        <div className="w-full lg:w-[45%] flex flex-col h-full min-h-0 bg-[#FCF9F3] border-2 border-[#264D59] shadow-[3px_3px_0px_#264D59] p-2.5 justify-between">
+        {/* RIGHT COLUMN: RULES & CONFIGURATION EDITOR (52% width) */}
+        <div className="w-full lg:w-[52%] flex flex-col h-full min-h-0 bg-[#FCF9F3] border-2 border-[#264D59] shadow-[3px_3px_0px_#264D59] p-2.5 justify-between">
           {/* Panel Header */}
           <div className="shrink-0 flex items-center justify-between pb-1.5 border-b-2 border-[#264D59]">
             <div className="flex items-center gap-1.5">
@@ -336,12 +503,12 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
 
           {/* Config Form Container */}
           {activeCard ? (
-            <form onSubmit={handleSaveConfig} className="flex-1 min-h-0 flex flex-col justify-between py-1.5 gap-2 overflow-y-auto">
-              {/* Row 1: Name and Assigned Member (Dynamic members) */}
+            <form onSubmit={handleSaveConfig} className="flex-1 min-h-0 flex flex-col justify-between py-1.5 gap-2 overflow-y-auto pr-0.5">
+              {/* Row 1: Name and Assigned Member */}
               <div className="grid grid-cols-12 gap-2 shrink-0">
                 <div className="col-span-7 flex flex-col">
                   <label htmlFor={`cfgMethodName-${uniqueId}`} className="font-headline font-bold text-[10px] uppercase tracking-wider text-[#264D59] flex items-center justify-between">
-                    <span>Method Name</span>
+                    <span>Card / Method Name</span>
                     <span className="text-[9px] text-[#41484b] font-normal">Last 4: {activeCard.last4}</span>
                   </label>
                   <input
@@ -393,14 +560,20 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
                 </div>
               </div>
 
-              {/* Row 3: Billing & Reward Cycle Rules */}
-              <div className="shrink-0 p-1.5 bg-[#F6F3ED] border-2 border-[#264D59] flex flex-col gap-1.5">
+              {/* Row 3: Billing & Statement Cycle Rules (Statement Start Day & End Day Capture & Reset Engine) */}
+              <div className="shrink-0 p-2 bg-[#F6F3ED] border-2 border-[#264D59] flex flex-col gap-1.5">
                 <div className="flex items-center justify-between">
-                  <span className="font-headline font-bold text-[10px] uppercase tracking-wider text-[#264D59]">
-                    Billing &amp; Reward Cycle
+                  <div className="flex items-center gap-1">
+                    <span className="material-symbols-outlined text-sm font-bold text-[#264D59]">calendar_month</span>
+                    <span className="font-headline font-bold text-[10px] uppercase tracking-wider text-[#264D59]">
+                      Statement Date &amp; Cap Reset Cycle
+                    </span>
+                  </div>
+                  <span className="text-[9px] font-label font-bold text-[#43978D] bg-white px-1.5 border border-[#264D59]">
+                    Resets in {previewCycleWindow.resetInDays} days
                   </span>
-                  <span className="text-[9px] font-label text-[#41484b]">T&amp;C Reset Type</span>
                 </div>
+
                 <div className="grid grid-cols-2 gap-2 text-[10px] font-label">
                   <label className="flex items-center gap-1.5 cursor-pointer bg-white p-1 border border-[#264D59]">
                     <input
@@ -409,15 +582,15 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
                       checked={formCycle === 'calendar'}
                       onChange={() => {
                         setFormCycle('calendar');
-                        if (!formCycleDesc.includes('Statement')) {
-                          setFormCycleDesc('Calendar (1st - End of Month)');
-                        }
+                        setFormStartDay(1);
+                        setFormEndDay(31);
+                        setFormCycleDesc('Calendar (1st - End of Month)');
                       }}
                       className="accent-[#264D59]"
                     />
                     <div>
                       <strong className="block uppercase text-[#264D59]">Calendar Month</strong>
-                      <span className="text-[9px] text-[#41484b]">1st to last calendar day</span>
+                      <span className="text-[9px] text-[#41484b]">Resets on the 1st of each month</span>
                     </div>
                   </label>
 
@@ -428,28 +601,103 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
                       checked={formCycle === 'statement'}
                       onChange={() => {
                         setFormCycle('statement');
-                        if (!formCycleDesc || formCycleDesc.includes('Calendar')) {
-                          setFormCycleDesc('Statement Date (15th - 14th)');
-                        }
+                        if (formStartDay === 1) setFormStartDay(15);
+                        if (formEndDay === 31) setFormEndDay(14);
+                        setFormCycleDesc('Statement Date (15th - 14th)');
                       }}
                       className="accent-[#264D59]"
                     />
                     <div>
                       <strong className="block uppercase text-[#264D59]">Statement Cycle</strong>
-                      <span className="text-[9px] text-[#41484b]">Custom statement reset</span>
+                      <span className="text-[9px] text-[#41484b]">Resets on card statement date</span>
                     </div>
                   </label>
                 </div>
-                <div className="flex items-center gap-1.5 bg-white p-1 border border-[#264D59]">
-                  <span className="text-[9px] font-headline font-bold uppercase text-[#41484b] shrink-0">Cycle Note:</span>
-                  <input
-                    type="text"
-                    value={formCycleDesc}
-                    onChange={(e) => setFormCycleDesc(e.target.value)}
-                    placeholder="e.g. Statement Date (15th - 14th) or Calendar (1st - End)"
-                    className="w-full text-[10px] font-label font-bold text-[#264D59] focus:outline-none"
-                  />
-                </div>
+
+                {/* If Statement Cycle is active, capture explicit statement start & end days */}
+                {formCycle === 'statement' ? (
+                  <div className="bg-white p-1.5 border border-[#264D59] flex flex-col gap-1.5">
+                    <div className="grid grid-cols-12 gap-2 items-center">
+                      <div className="col-span-6 flex flex-col">
+                        <label className="font-headline font-bold text-[9px] uppercase text-[#264D59]">
+                          Statement Start Day
+                        </label>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <input
+                            type="number"
+                            min={1}
+                            max={31}
+                            value={formStartDay}
+                            onChange={(e) => {
+                              const val = Math.max(1, Math.min(31, parseInt(e.target.value) || 1));
+                              setFormStartDay(val);
+                              const computedEnd = val === 1 ? 31 : val - 1;
+                              setFormEndDay(computedEnd);
+                              setFormCycleDesc(`Statement Date (${val}th - ${computedEnd}th)`);
+                            }}
+                            className="w-16 border-2 border-[#264D59] p-1 font-headline font-bold text-xs text-center text-[#264D59]"
+                          />
+                          <span className="text-[9px] font-label font-bold text-[#41484b]">th of month</span>
+                        </div>
+                      </div>
+
+                      <div className="col-span-6 flex flex-col">
+                        <label className="font-headline font-bold text-[9px] uppercase text-[#264D59]">
+                          Statement End Day
+                        </label>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <input
+                            type="number"
+                            min={1}
+                            max={31}
+                            value={formEndDay}
+                            onChange={(e) => {
+                              const val = Math.max(1, Math.min(31, parseInt(e.target.value) || 1));
+                              setFormEndDay(val);
+                              setFormCycleDesc(`Statement Date (${formStartDay}th - ${val}th)`);
+                            }}
+                            className="w-16 border-2 border-[#264D59] p-1 font-headline font-bold text-xs text-center text-[#264D59]"
+                          />
+                          <span className="text-[9px] font-label font-bold text-[#41484b]">th of following</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Quick Presets for Singapore banks */}
+                    <div className="flex items-center gap-1 pt-1 border-t border-[#264D59]/30 flex-wrap">
+                      <span className="text-[8px] font-headline font-bold uppercase text-[#41484b]">Presets:</span>
+                      <button
+                        type="button"
+                        onClick={() => handleApplyCyclePreset(15, 14, 'Statement Date (15th - 14th)')}
+                        className="px-1.5 py-0.5 bg-[#F0EEE8] hover:bg-[#F9E07F] border border-[#264D59] text-[8px] font-bold uppercase"
+                      >
+                        15th – 14th (HSBC/DBS)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleApplyCyclePreset(20, 19, 'Statement Date (20th - 19th)')}
+                        className="px-1.5 py-0.5 bg-[#F0EEE8] hover:bg-[#F9E07F] border border-[#264D59] text-[8px] font-bold uppercase"
+                      >
+                        20th – 19th (Citi)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleApplyCyclePreset(24, 23, 'Statement Date (24th - 23rd)')}
+                        className="px-1.5 py-0.5 bg-[#F0EEE8] hover:bg-[#F9E07F] border border-[#264D59] text-[8px] font-bold uppercase"
+                      >
+                        24th – 23rd (UOB)
+                      </button>
+                    </div>
+
+                    <div className="text-[9px] font-label text-[#264D59] bg-[#F9E07F]/20 p-1 border border-[#264D59]/40">
+                      <strong>Statement Reset Behavior:</strong> This card’s spending cap resets strictly on the <strong>{formStartDay}th</strong> of each month. Active cycle: <strong>{previewCycleWindow.displayRange}</strong>. Only transactions within these dates count against its spend cap.
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[9px] font-label text-[#264D59] bg-white p-1 border border-[#264D59]">
+                    <strong>Calendar Month Reset:</strong> Resets on the 1st of each calendar month. (Active range: {previewCycleWindow.displayRange}).
+                  </div>
+                )}
               </div>
 
               {/* Row 4: Spend Target / Cap & Rounding Block & Current Spend */}
@@ -473,7 +721,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
 
                 <div className="col-span-4 flex flex-col">
                   <label htmlFor={`cfgCurrentSpend-${uniqueId}`} className="font-headline font-bold text-[9px] uppercase tracking-wider text-[#264D59]">
-                    Month Spend
+                    Statement Spend
                   </label>
                   <div className="flex items-center bg-white border-2 border-[#264D59] px-1.5 py-0.5">
                     <span className="font-headline font-bold text-[10px] mr-1 text-[#41484b]">$</span>
@@ -487,17 +735,24 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
                     />
                   </div>
                   <div className="flex items-center justify-between text-[8px] font-label text-[#41484b]">
-                    <span>Current ledger spend</span>
+                    <span>Current cycle spend</span>
                     <button
                       type="button"
                       onClick={() => {
-                        const cardExpenses = expenses.filter((e) => e.paymentMethodId === activeCard?.id);
+                        const cycleWindow = getCardStatementCycleWindow({
+                          billingCycleType: formCycle,
+                          statementStartDay: formStartDay,
+                          statementEndDay: formEndDay,
+                        });
+                        const cardExpenses = expenses.filter(
+                          (e) => e.paymentMethodId === activeCard?.id && cycleWindow.isWithinCycle(e)
+                        );
                         const total = cardExpenses.reduce((s, e) => s + e.amount, 0);
                         setFormCurrentSpend(total.toFixed(2));
-                        showToast(`Calculated $${total.toFixed(2)} from ${cardExpenses.length} logged expenses.`);
+                        showToast(`Calculated $${total.toFixed(2)} from ${cardExpenses.length} transactions in active cycle!`);
                       }}
                       className="text-[#264D59] hover:underline font-bold flex items-center gap-0.5 uppercase cursor-pointer"
-                      title="Sync spend for this card from expenses log"
+                      title="Sync spend for this card from expenses matching active statement cycle"
                     >
                       <span className="material-symbols-outlined text-[10px]">sync</span>
                       Match Log
@@ -561,35 +816,95 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
                 </div>
               </div>
 
-              {/* Row 6: Auto-Route Eligible Categories */}
-              <div className="shrink-0 flex flex-col">
-                <span className="font-headline font-bold text-[10px] uppercase tracking-wider text-[#264D59] mb-0.5">
-                  Auto-Route Eligible Categories
-                </span>
-                <div className="grid grid-cols-2 gap-1 text-[9px] font-label">
-                  {[
-                    { id: 'dining', label: 'Dining & Restaurants (MCC 5812)' },
-                    { id: 'online_food', label: 'Online Food Delivery (Grab/Panda)' },
-                    { id: 'online_shopping', label: 'Online Shopping (Shopee/Lazada)' },
-                    { id: 'groceries', label: 'Groceries & Supermarkets (5411)' },
-                    { id: 'travel', label: 'Travel & Flights (SIA/Scoot/Hotels)' },
-                    { id: 'transport', label: 'Public Transit & Rides (SimplyGo)' },
-                    { id: 'utilities', label: 'Utilities & SP Services GIRO' },
-                    { id: 'general', label: 'General / All Other Eligible' },
-                  ].map((item) => (
-                    <label
-                      key={item.id}
-                      className="flex items-center gap-1.5 bg-white p-1 border border-[#264D59] cursor-pointer hover:bg-[#F0EEE8]"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={formCategories.includes(item.id)}
-                        onChange={() => handleCategoryToggle(item.id)}
-                        className="accent-[#264D59]"
-                      />
-                      <span className="font-bold text-[#264D59] truncate">{item.label}</span>
-                    </label>
-                  ))}
+              {/* Row 6: Auto-Route Eligible Categories (Expanded beyond 8 + Online Fetch + Uncheck / Check) */}
+              <div className="shrink-0 flex flex-col gap-1 p-2 bg-[#FCF9F3] border-2 border-[#264D59]">
+                <div className="flex items-center justify-between flex-wrap gap-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-headline font-bold text-[10px] uppercase tracking-wider text-[#264D59]">
+                      Auto-Route Eligible Categories
+                    </span>
+                    <span className="bg-[#264D59] text-white px-1.5 py-0.2 text-[9px] font-label font-bold">
+                      {formCategories.length} Selected
+                    </span>
+                  </div>
+
+                  {/* Online Fetch / Check Button */}
+                  <button
+                    type="button"
+                    onClick={handleFetchOnlineCategories}
+                    disabled={isFetchingCategories}
+                    className="flex items-center gap-1 bg-[#F9E07F] hover:bg-[#F9AD6A] text-[#264D59] border border-[#264D59] px-2 py-0.5 text-[10px] font-headline font-bold uppercase shadow-[1px_1px_0px_#264D59] transition-all disabled:opacity-50"
+                    title="Fetch & check online for eligible reward categories based on card name"
+                  >
+                    <span className={`material-symbols-outlined text-xs ${isFetchingCategories ? 'animate-spin' : ''}`}>
+                      {isFetchingCategories ? 'sync' : 'travel_explore'}
+                    </span>
+                    <span>{isFetchingCategories ? 'Checking...' : 'Fetch / Check Online'}</span>
+                  </button>
+                </div>
+
+                {/* Notice banner after fetching */}
+                {categoryFetchNotice && (
+                  <div className="bg-[#F9E07F]/30 border border-[#264D59] p-1.5 flex items-start gap-1.5 text-[9px] font-label text-[#264D59]">
+                    <span className="material-symbols-outlined text-xs text-[#264D59] shrink-0 mt-0.5">info</span>
+                    <div className="flex-1">
+                      <span>{categoryFetchNotice}</span>
+                      <p className="font-bold mt-0.5 text-[#D46C4E]">
+                        Tip: You can uncheck any categories below that do not apply to your card!
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Categories Grid (Allows checking and unchecking any category!) */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 text-[9px] font-label max-h-40 overflow-y-auto pr-1 border border-[#264D59]/30 p-1 bg-white">
+                  {availableCategories.map((item) => {
+                    const isChecked = formCategories.includes(item.id);
+                    return (
+                      <label
+                        key={item.id}
+                        className={`flex items-start gap-1.5 p-1 border cursor-pointer transition-colors ${
+                          isChecked
+                            ? 'bg-[#F9E07F]/30 border-[#264D59] font-bold text-[#264D59]'
+                            : 'bg-white border-gray-200 text-[#41484b] hover:bg-gray-50'
+                        }`}
+                        title={item.mccExamples ? `Examples: ${item.mccExamples}` : undefined}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => handleCategoryToggle(item.id)}
+                          className="accent-[#264D59] mt-0.5"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <span className="block truncate">{item.label}</span>
+                          {item.mccExamples && (
+                            <span className="text-[7.5px] text-[#41484b]/80 block truncate">
+                              {item.mccExamples}
+                            </span>
+                          )}
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+
+                {/* Custom Category Tag Addition */}
+                <div className="flex items-center gap-1.5 pt-1 border-t border-[#264D59]/30">
+                  <input
+                    type="text"
+                    value={customCategoryInput}
+                    onChange={(e) => setCustomCategoryInput(e.target.value)}
+                    placeholder="+ Add custom category (e.g. Pet Care, Cruise Lines, Wine)"
+                    className="flex-1 bg-white px-2 py-0.5 text-[9px] font-label border border-[#264D59] text-[#264D59] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCustomCategory}
+                    className="px-2 py-0.5 bg-[#264D59] text-white font-headline font-bold text-[9px] uppercase border border-[#264D59] hover:bg-[#43978D]"
+                  >
+                    + Add
+                  </button>
                 </div>
               </div>
 
@@ -617,7 +932,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
                     className="px-4 py-1.5 bg-[#264D59] text-white font-headline font-bold text-xs uppercase tracking-wider border-2 border-[#264D59] shadow-[2px_2px_0px_#F9E07F] hover:bg-[#43978D] hover:text-white transition-colors flex items-center gap-1"
                   >
                     <span className="material-symbols-outlined text-xs">save</span>
-                    <span>Save Configuration</span>
+                    <span>Save &amp; Sync to Supabase</span>
                   </button>
                 </div>
               </div>
@@ -630,7 +945,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
         </div>
       </div>
 
-      {/* 3. Bottom Household Configuration Bar (Dynamic Members) */}
+      {/* 3. Bottom Household Configuration Bar */}
       <div className="shrink-0 mt-2 bg-[#FCF9F3]/90 backdrop-blur-sm border-2 border-[#264D59] px-3 py-1.5 flex items-center justify-between font-label text-[10px] shadow-[2px_2px_0px_#264D59]">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -660,7 +975,7 @@ export const PaymentMethodsView: React.FC<PaymentMethodsViewProps> = ({
           </div>
           <div className="flex items-center gap-1 text-[#41484b]">
             <span className="w-1.5 h-1.5 bg-[#43978D] rounded-full"></span>
-            <span className="font-medium text-[#264D59]">Engine: Dynamic Storage Active</span>
+            <span className="font-medium text-[#264D59]">Cloud Sync: Realtime Supabase Active</span>
           </div>
         </div>
       </div>

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { PRESET_CARDS_CATALOG } from '../data/initialData';
+import { getCardStatementCycleWindow } from '../utils/dateUtils';
 
 export const CardStrategyView: React.FC<{ onOpenConfigureCard: (cardId?: string) => void }> = ({
   onOpenConfigureCard,
@@ -183,6 +184,7 @@ export const CardStrategyView: React.FC<{ onOpenConfigureCard: (cardId?: string)
           const isNear = card.bonusCap > 0 && !isCapped && card.bonusCap - card.currentSpend <= 150;
           const spendPct = card.bonusCap > 0 ? (card.currentSpend / card.bonusCap) * 100 : 45;
           const remainingHeadroom = card.bonusCap > 0 ? card.bonusCap - card.currentSpend : 0;
+          const cycleWindow = getCardStatementCycleWindow(card);
 
           let badgeText = card.statusTag || 'Active';
           let badgeBg = card.statusTagBg || '#264D59';
@@ -308,9 +310,18 @@ export const CardStrategyView: React.FC<{ onOpenConfigureCard: (cardId?: string)
                 {/* Metric Details */}
                 <div className="space-y-1 text-[10px] font-body border-t border-[#264D59]/25 pt-1.5">
                   <div className="flex justify-between items-center">
-                    <span className="text-[#41484b]">Billing Cycle:</span>
-                    <span className="font-label font-bold text-[#264D59] truncate max-w-[120px]">
-                      {card.billingCycleDesc}
+                    <span className="text-[#41484b]">Statement Cycle:</span>
+                    <span className="font-label font-bold text-[#264D59] truncate max-w-[130px]" title={cycleWindow.displayRange}>
+                      {card.billingCycleType === 'statement'
+                        ? `${card.statementStartDay || 15}th – ${card.statementEndDay || 14}th`
+                        : '1st – End of Month'}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between items-center text-[9px]">
+                    <span className="text-[#41484b]">Cap Reset:</span>
+                    <span className="font-label font-bold text-[#264D59] bg-[#F9E07F]/40 px-1 border border-[#264D59]/30">
+                      Resets in {cycleWindow.resetInDays}d ({cycleWindow.nextResetDate.getDate()} {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][cycleWindow.nextResetDate.getMonth()]})
                     </span>
                   </div>
 

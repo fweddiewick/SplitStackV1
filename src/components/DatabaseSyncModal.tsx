@@ -189,6 +189,8 @@ CREATE TABLE IF NOT EXISTS public.payment_methods (
     card_subtitle TEXT,
     billing_cycle_type TEXT DEFAULT 'calendar',
     billing_cycle_desc TEXT,
+    statement_start_day INTEGER DEFAULT 1,
+    statement_end_day INTEGER DEFAULT 31,
     current_spend NUMERIC(10, 2) DEFAULT 0.00,
     bonus_cap NUMERIC(10, 2) DEFAULT 1000.00,
     min_spend_target NUMERIC(10, 2),
@@ -224,6 +226,8 @@ ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS status_tag_bg TEXT D
 ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS card_subtitle TEXT;
 ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS billing_cycle_type TEXT DEFAULT 'calendar';
 ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS billing_cycle_desc TEXT;
+ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS statement_start_day INTEGER DEFAULT 1;
+ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS statement_end_day INTEGER DEFAULT 31;
 ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS current_spend NUMERIC(10, 2) DEFAULT 0.00;
 ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS bonus_cap NUMERIC(10, 2) DEFAULT 1000.00;
 ALTER TABLE public.payment_methods ADD COLUMN IF NOT EXISTS min_spend_target NUMERIC(10, 2);

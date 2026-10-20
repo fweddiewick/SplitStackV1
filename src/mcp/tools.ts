@@ -153,14 +153,17 @@ export function executeRecommendCard(
     }
 
     // Dynamic category matching against card.eligibleCategories
-    const cardCats = (card.eligibleCategories || []).map((c) => c.toLowerCase());
+    const cleanDet = detectedCategory.toLowerCase().replace(/[^a-z0-9]/g, ' ');
+    const cardCats = (card.eligibleCategories || []).map((c) => c.toLowerCase().replace(/[^a-z0-9]/g, ' '));
     const matchedCategory = cardCats.some(
       (cat) =>
-        cat.includes(detectedCategory) ||
-        detectedCategory.includes(cat) ||
-        (cat === 'groceries' && query.includes('fairprice')) ||
-        (cat === 'dining' && (query.includes('hdl') || query.includes('food') || query.includes('grab'))) ||
-        (cat === 'online_shopping' && (query.includes('shopee') || query.includes('lazada')))
+        cat.includes(cleanDet) ||
+        cleanDet.includes(cat) ||
+        (cat.includes('grocer') && (query.includes('fairprice') || query.includes('cold storage') || query.includes('sheng siong'))) ||
+        (cat.includes('dining') && (query.includes('hdl') || query.includes('food') || query.includes('grab') || query.includes('restaurant'))) ||
+        (cat.includes('shopping') && (query.includes('shopee') || query.includes('lazada') || query.includes('amazon') || query.includes('taobao'))) ||
+        (cat.includes('travel') && (query.includes('scoot') || query.includes('air') || query.includes('hotel') || query.includes('agoda'))) ||
+        (cat.includes('transport') && (query.includes('simplygo') || query.includes('mrt') || query.includes('bus') || query.includes('gojek')))
     );
 
     if (matchedCategory && !isCapped && !isExcluded) {
