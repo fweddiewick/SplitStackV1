@@ -50,7 +50,7 @@ export interface CardMethod {
   isDefaultPayer?: boolean;
 }
 
-export type SplitMode = 'equal' | 'pair' | 'custom';
+export type SplitMode = 'equal' | 'pair' | 'custom' | 'selected';
 
 export interface Expense {
   id: string;
@@ -65,6 +65,7 @@ export interface Expense {
   paymentMethodId: string;
   splitMode: SplitMode;
   splitBreakdown: Record<MemberId, number>; // Maps member id to owed share
+  splitMemberIds?: MemberId[]; // Members the expense applies to
   customWeights?: Record<MemberId, number>;
   pairMemberIds?: [MemberId, MemberId]; // For 2-way splits
   notes?: string;

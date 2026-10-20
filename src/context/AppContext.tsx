@@ -74,7 +74,8 @@ interface AppContextType {
     mode: SplitMode,
     payerId: string,
     pairMemberIds?: [string, string],
-    customWeights?: Record<string, number>
+    customWeights?: Record<string, number>,
+    selectedMemberIds?: string[]
   ) => Record<string, number>;
   calculateCardEligibility: (
     card: CardMethod,
@@ -454,13 +455,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     mode: SplitMode,
     payerId: string,
     pairMemberIds?: [string, string],
-    customWeights?: Record<string, number>
+    customWeights?: Record<string, number>,
+    selectedMemberIds?: string[]
   ): Record<string, number> => {
     const cleanAmount = Math.max(0, Number(amount.toFixed(2)));
     const breakdown: Record<string, number> = {};
     const memberCount = members.length;
 
     if (memberCount === 0) return {};
+
+    // Initialize all members to $0.00
+    members.forEach((m) => {
+      breakdown[m.id] = 0;
+    });
+
+    // Checkbox Selected Beneficiaries Mode (1, 2, or N members)
+    if (mode === 'selected' || (selectedMemberIds !== undefined && selectedMemberIds.length > 0)) {
+      const activeIds = (selectedMemberIds && selectedMemberIds.length > 0)
+        ? selectedMemberIds.filter((id) => members.some((m) => m.id === id))
+        : members.map((m) => m.id);
+
+      if (activeIds.length === 0) {
+        breakdown[payerId] = cleanAmount;
+        return breakdown;
+      }
+
+      const count = activeIds.length;
+      const baseShare = Math.floor((cleanAmount / count) * 100) / 100;
+      const allocatedTotal = baseShare * count;
+      const remainderCents = Math.round((cleanAmount - allocatedTotal) * 100);
+
+      activeIds.forEach((id) => {
+        breakdown[id] = baseShare;
+      });
+
+      // Distribute any remainder pennies (1 cent at a time) to the payer (if selected) or first active member
+      let extra = remainderCents;
+      const targetRecipient = activeIds.includes(payerId) ? payerId : activeIds[0];
+      if (extra > 0 && breakdown[targetRecipient] !== undefined) {
+        breakdown[targetRecipient] = Number((breakdown[targetRecipient] + extra / 100).toFixed(2));
+      }
+      return breakdown;
+    }
 
     if (mode === 'equal') {
       const baseShare = Math.floor((cleanAmount / memberCount) * 100) / 100;
@@ -481,9 +517,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (mode === 'pair' && pairMemberIds && pairMemberIds.length === 2) {
-      members.forEach((m) => {
-        breakdown[m.id] = 0;
-      });
       const [m1, m2] = pairMemberIds;
       const half = Math.floor((cleanAmount / 2) * 100) / 100;
       const rem = Math.round((cleanAmount - half * 2) * 100) / 100;
@@ -520,9 +553,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Default: all to payer
-    members.forEach((m) => {
-      breakdown[m.id] = m.id === payerId ? cleanAmount : 0;
-    });
+    breakdown[payerId] = cleanAmount;
     return breakdown;
   };
 

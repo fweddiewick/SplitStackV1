@@ -35,25 +35,33 @@ export const LogExpenseView: React.FC = () => {
     'Supermarket',
   ]);
   const [payerId, setPayerId] = useState<MemberId>(members[0]?.id || 'ryan');
-  const [splitMode, setSplitMode] = useState<SplitMode>('equal');
-  const [pairMembers, setPairMembers] = useState<[string, string]>([
-    members[0]?.id || 'ryan',
-    members[1]?.id || 'sarah',
-  ]);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<MemberId[]>(() =>
+    members.map((m) => m.id)
+  );
   const [selectedMethodId, setSelectedMethodId] = useState<string>(
     paymentMethods[0]?.id || 'uob-one'
   );
   const [mccSearchSource, setMccSearchSource] = useState<string>('Live CheckMCC');
 
-  // Custom percentages
-  const [customWeights, setCustomWeights] = useState<Record<string, number>>(() => {
-    const init: Record<string, number> = {};
-    const equalShare = Number((100 / (members.length || 1)).toFixed(2));
-    members.forEach((m) => {
-      init[m.id] = equalShare;
+  // Keep selected members in sync if household members change
+  useEffect(() => {
+    setSelectedMemberIds((prev) => {
+      const valid = prev.filter((id) => members.some((m) => m.id === id));
+      return valid.length > 0 ? valid : members.map((m) => m.id);
     });
-    return init;
-  });
+  }, [members]);
+
+  const toggleMemberBeneficiary = (id: MemberId) => {
+    if (selectedMemberIds.includes(id)) {
+      if (selectedMemberIds.length === 1) {
+        showToast('At least one person must be selected for this expense', 'info');
+        return;
+      }
+      setSelectedMemberIds(selectedMemberIds.filter((mId) => mId !== id));
+    } else {
+      setSelectedMemberIds([...selectedMemberIds, id]);
+    }
+  };
 
   const numAmount = Math.max(0, parseFloat(amount.replace(/[^0-9.]/g, '')) || 0);
 
@@ -108,13 +116,14 @@ export const LogExpenseView: React.FC = () => {
     }
   };
 
-  // Cent precision split preview across dynamic members
+  // Cent precision split preview across checkbox-selected members
   const splitBreakdown = calculateSplit(
     numAmount,
-    splitMode,
+    'selected',
     payerId,
-    splitMode === 'pair' ? pairMembers : undefined,
-    splitMode === 'custom' ? customWeights : undefined
+    undefined,
+    undefined,
+    selectedMemberIds
   );
 
   // Selected Card Intelligence
@@ -143,6 +152,10 @@ export const LogExpenseView: React.FC = () => {
       showToast('Please enter a valid expense amount', 'error');
       return;
     }
+    if (selectedMemberIds.length === 0) {
+      showToast('Please select at least one household member for this expense', 'error');
+      return;
+    }
 
     const finalIso = isoDate || toIsoDateString(dateStr);
     const finalDate = dateStr || formatDisplayDate(finalIso);
@@ -157,10 +170,9 @@ export const LogExpenseView: React.FC = () => {
       amount: numAmount,
       payerId,
       paymentMethodId: selectedMethodId,
-      splitMode,
+      splitMode: 'selected',
+      splitMemberIds: selectedMemberIds,
       splitBreakdown,
-      pairMemberIds: splitMode === 'pair' ? pairMembers : undefined,
-      customWeights: splitMode === 'custom' ? customWeights : undefined,
       settled: false,
       eligibleBlocksAmount: intel.eligibleAmount,
       rewardEstimated: currentCard ? `${currentCard.name} • ${currentCard.bonusRate}` : 'General',
@@ -174,7 +186,7 @@ export const LogExpenseView: React.FC = () => {
     setAmount('0.00');
     setMcc('5411');
     setSelectedTags(['Groceries (MCC 5411)']);
-    setSplitMode('equal');
+    setSelectedMemberIds(members.map((m) => m.id));
     showToast('Form fields cleared.');
   };
 
@@ -434,89 +446,148 @@ export const LogExpenseView: React.FC = () => {
             </div>
           </div>
 
-          {/* Row 4: Split Ratio Allocation Engine */}
+          {/* Row 4: Who Is This Expense For? (Checkbox Selection & Auto Settlement) */}
           <div className="flex flex-col gap-1.5 bg-[#FBF8F2] p-2 border-2 border-[#264D59]">
             <div className="flex items-center justify-between">
-              <span className="text-[9px] font-headline font-bold uppercase text-[#41484b]">
-                Split Ratio Allocation Engine:
-              </span>
-              <span className="text-[9px] font-headline font-bold bg-[#264D59] text-white px-1.5 py-0.2 uppercase">
-                Cent Precision Engine
-              </span>
-            </div>
-
-            {/* Split Mode Buttons */}
-            <div className="flex flex-wrap gap-1">
-              <button
-                type="button"
-                onClick={() => setSplitMode('equal')}
-                className={`border-2 border-[#264D59] px-2 py-1 text-[9px] font-headline font-bold uppercase tracking-tight text-center transition-all ${
-                  splitMode === 'equal'
-                    ? 'bg-[#264D59] text-white shadow-[1px_1px_0px_#264D59]'
-                    : 'bg-[#FCF9F3] text-[#264D59] hover:bg-[#F0EEE8]'
-                }`}
-              >
-                Equal All ({(100 / (members.length || 1)).toFixed(1)}%)
-              </button>
-
-              {members.length >= 2 && (
+              <div className="flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-xs text-[#264D59]">checklist</span>
+                <span className="text-[9px] font-headline font-bold uppercase text-[#264D59]">
+                  Who Is This Expense For? (Select via Checkboxes):
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  onClick={() => {
-                    setSplitMode('pair');
-                    setPairMembers([members[0].id, members[1].id]);
-                  }}
-                  className={`border-2 border-[#264D59] px-2 py-1 text-[9px] font-headline font-bold uppercase tracking-tight text-center transition-all ${
-                    splitMode === 'pair'
-                      ? 'bg-[#264D59] text-white shadow-[1px_1px_0px_#264D59]'
-                      : 'bg-[#FCF9F3] text-[#264D59] hover:bg-[#F0EEE8]'
-                  }`}
+                  onClick={() => setSelectedMemberIds(members.map((m) => m.id))}
+                  className="text-[8px] font-headline font-bold uppercase px-1.5 py-0.5 border border-[#264D59] bg-[#FCF9F3] hover:bg-[#F9E07F] text-[#264D59] transition-colors"
+                  title="Split across all household members"
                 >
-                  Pair 50/50
+                  All ({members.length})
                 </button>
-              )}
-
-              <button
-                type="button"
-                onClick={() => setSplitMode('custom')}
-                className={`border-2 border-[#264D59] px-2 py-1 text-[9px] font-headline font-bold uppercase tracking-tight text-center transition-all ${
-                  splitMode === 'custom'
-                    ? 'bg-[#264D59] text-white shadow-[1px_1px_0px_#264D59]'
-                    : 'bg-[#FCF9F3] text-[#264D59] hover:bg-[#F0EEE8]'
-                }`}
-              >
-                Custom %
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedMemberIds([payerId])}
+                  className="text-[8px] font-headline font-bold uppercase px-1.5 py-0.5 border border-[#264D59] bg-[#FCF9F3] hover:bg-[#F9E07F] text-[#264D59] transition-colors"
+                  title="Only the person who paid (personal expense)"
+                >
+                  Only {members.find((m) => m.id === payerId)?.name.split(' ')[0] || 'Payer'}
+                </button>
+              </div>
             </div>
 
-            {/* Dynamic Breakdown Preview Blocks */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 pt-1 border-t-2 border-[#264D59] mt-0.5 max-h-24 overflow-y-auto">
+            {/* Member Checkbox Cards (Matching Paid By section style) */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1.5 max-h-28 overflow-y-auto pr-0.5">
               {members.map((m) => {
-                const share = splitBreakdown[m.id] || 0;
-                const pct = numAmount > 0 ? ((share / numAmount) * 100).toFixed(1) : '0.0';
+                const isChecked = selectedMemberIds.includes(m.id);
+                const isPayer = m.id === payerId;
+                const ratioPct = isChecked && selectedMemberIds.length > 0
+                  ? ((1 / selectedMemberIds.length) * 100).toFixed(1)
+                  : '0.0';
+                const shareAmount = splitBreakdown[m.id] || 0;
 
                 return (
                   <div
                     key={m.id}
-                    className="bg-[#FCF9F3] border-2 border-[#264D59] p-1.5 flex flex-col justify-between shadow-[1px_1px_0px_#264D59]"
+                    onClick={() => toggleMemberBeneficiary(m.id)}
+                    className={`cursor-pointer border-2 border-[#264D59] p-1.5 flex flex-col justify-between transition-all select-none ${
+                      isChecked
+                        ? 'bg-[#F9E07F] shadow-[1.5px_1.5px_0px_#264D59]'
+                        : 'bg-[#FCF9F3] opacity-60 hover:opacity-90 hover:bg-[#F0EEE8]'
+                    }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-[9px] font-headline font-bold uppercase text-[#264D59] truncate">
-                        {m.name.split(' ')[0]}'s Share
+                      <span className="font-headline font-bold text-xs uppercase leading-none text-[#264D59] truncate">
+                        {m.name}
                       </span>
-                      <span className="text-[8px] font-mono bg-[#F9E07F]/60 px-1 border border-[#264D59] font-bold text-[#264D59]">
-                        {pct}%
+                      {/* Interactive Checkbox Indicator */}
+                      <div
+                        className={`w-3.5 h-3.5 border-2 border-[#264D59] flex items-center justify-center text-[9px] font-bold ${
+                          isChecked ? 'bg-[#264D59] text-[#F9E07F]' : 'bg-white'
+                        }`}
+                      >
+                        {isChecked ? '✓' : ''}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between mt-1">
+                      <span className="text-[8px] font-label font-bold text-[#264D59] bg-[#FCF9F3] px-1 border border-[#264D59] uppercase">
+                        {isPayer ? 'PAYER' : m.role === 'lead' ? 'LEAD' : 'MEMBER'}
+                      </span>
+                      <span className="text-[8px] font-mono font-bold text-[#264D59] bg-white px-1 border border-[#264D59]">
+                        {ratioPct}%
                       </span>
                     </div>
-                    <div className="flex items-baseline justify-between mt-1">
-                      <span className="text-[9px] font-headline font-bold text-[#41484b]">SGD</span>
-                      <span className="text-xs font-headline font-bold tracking-tight text-[#264D59]">
-                        ${share.toFixed(2)}
+
+                    {/* Calculated Share & Bilateral Settlement Note */}
+                    <div className="flex items-baseline justify-between mt-1 pt-0.5 border-t border-[#264D59]/30">
+                      <span className="text-[8px] font-mono text-[#41484b] truncate">
+                        {isPayer
+                          ? isChecked
+                            ? 'Own share'
+                            : 'Paid 0% own'
+                          : isChecked
+                          ? `Owes ${members.find((x) => x.id === payerId)?.name.split(' ')[0] || 'Payer'}`
+                          : 'Excluded'}
+                      </span>
+                      <span className="text-[11px] font-headline font-bold text-[#264D59] tracking-tight">
+                        ${shareAmount.toFixed(2)}
                       </span>
                     </div>
                   </div>
                 );
               })}
+            </div>
+
+            {/* Dynamic Settlement Calculation Summary Box */}
+            <div className="bg-[#FCF9F3] border-2 border-[#264D59] p-1.5 flex flex-col gap-1 text-[10px]">
+              <div className="flex items-center justify-between border-b border-[#264D59]/30 pb-0.5">
+                <span className="font-headline font-bold uppercase text-[#264D59] flex items-center gap-1 text-[9px]">
+                  <span className="material-symbols-outlined text-xs text-[#43978D]">calculate</span>
+                  Settlement Calculation Preview (Based on Payer: {members.find((m) => m.id === payerId)?.name || 'Payer'})
+                </span>
+                <span className="font-mono text-[8px] font-bold text-[#264D59] bg-[#F9E07F] px-1 border border-[#264D59]">
+                  {selectedMemberIds.length} BENEFICIAR{selectedMemberIds.length === 1 ? 'Y' : 'IES'} ({(100 / Math.max(1, selectedMemberIds.length)).toFixed(1)}% SHARE)
+                </span>
+              </div>
+
+              {/* Settlement Interpretation */}
+              <div className="flex flex-col gap-0.5 font-body text-[9px] text-[#264D59]">
+                {selectedMemberIds.length === 1 && selectedMemberIds.includes(payerId) ? (
+                  <div className="flex items-center gap-1.5 text-[#264D59] font-medium bg-[#43978D]/15 p-1 border border-[#264D59]/30">
+                    <span className="material-symbols-outlined text-xs text-[#43978D]">person</span>
+                    <span>
+                      <strong>Personal Expense:</strong> 100% ($${numAmount.toFixed(2)}) is absorbed by{' '}
+                      <strong>{members.find((m) => m.id === payerId)?.name}</strong>. No debts will be created in the settlement ledger.
+                    </span>
+                  </div>
+                ) : selectedMemberIds.length === 1 && !selectedMemberIds.includes(payerId) ? (
+                  <div className="flex items-center gap-1.5 text-[#264D59] font-medium bg-[#F9E07F]/30 p-1 border border-[#264D59]/30">
+                    <span className="material-symbols-outlined text-xs text-[#D46C4E]">arrow_forward</span>
+                    <span>
+                      <strong>100% Repayment:</strong> Paid entirely for{' '}
+                      <strong>{members.find((m) => m.id === selectedMemberIds[0])?.name}</strong>. They will owe{' '}
+                      <strong>{members.find((m) => m.id === payerId)?.name} ${numAmount.toFixed(2)} SGD</strong>.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[9px]">
+                      {members
+                        .filter((m) => m.id !== payerId && selectedMemberIds.includes(m.id))
+                        .map((m) => (
+                          <span key={m.id} className="bg-white px-1.5 py-0.2 border border-[#264D59]">
+                            • <strong>{m.name.split(' ')[0]}</strong> owes <strong>${(splitBreakdown[m.id] || 0).toFixed(2)}</strong>
+                          </span>
+                        ))}
+                    </div>
+                    <div className="text-[8px] font-mono text-[#41484b] mt-0.5">
+                      {selectedMemberIds.includes(payerId)
+                        ? `${members.find((m) => m.id === payerId)?.name.split(' ')[0]} covers $${(splitBreakdown[payerId] || 0).toFixed(2)} own share and will recover $${Object.entries(splitBreakdown).reduce((sum, [id, amt]) => id !== payerId ? sum + amt : sum, 0).toFixed(2)} from others.`
+                        : `${members.find((m) => m.id === payerId)?.name.split(' ')[0]} recovers full $${numAmount.toFixed(2)} from household members.`}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>

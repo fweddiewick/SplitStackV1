@@ -378,6 +378,7 @@ export async function fetchHouseholdData(): Promise<{
         splitMode: row.split_mode || 'equal',
         splitBreakdown:
           typeof row.split_breakdown === 'object' && row.split_breakdown !== null ? row.split_breakdown : {},
+        splitMemberIds: Array.isArray(row.split_member_ids) ? row.split_member_ids : undefined,
         customWeights: row.custom_weights || undefined,
         pairMemberIds: row.pair_member_ids || undefined,
         notes: row.notes || undefined,
@@ -649,7 +650,7 @@ export async function saveExpenseToSupabase(expense: Expense): Promise<{ success
   if (!client) return { success: false, error: 'Supabase client not initialized' };
 
   try {
-    const { error } = await client.from('household_expenses').upsert({
+    const payload: any = {
       id: expense.id,
       date: expense.date,
       iso_date: expense.isoDate,
@@ -662,6 +663,7 @@ export async function saveExpenseToSupabase(expense: Expense): Promise<{ success
       payment_method_id: expense.paymentMethodId,
       split_mode: expense.splitMode,
       split_breakdown: expense.splitBreakdown || {},
+      split_member_ids: expense.splitMemberIds || null,
       custom_weights: expense.customWeights || null,
       pair_member_ids: expense.pairMemberIds || null,
       settled: Boolean(expense.settled),
@@ -669,7 +671,16 @@ export async function saveExpenseToSupabase(expense: Expense): Promise<{ success
       reward_estimated: expense.rewardEstimated || '',
       notes: expense.notes || null,
       updated_at: new Date().toISOString(),
-    });
+    };
+
+    let { error } = await client.from('household_expenses').upsert(payload);
+
+    // If column split_member_ids does not exist on user's database, retry without it
+    if (error && error.message?.includes('split_member_ids')) {
+      delete payload.split_member_ids;
+      const retry = await client.from('household_expenses').upsert(payload);
+      error = retry.error;
+    }
 
     if (error) {
       console.error('Supabase error saving expense:', error);

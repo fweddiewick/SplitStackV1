@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS public.household_expenses (
     payment_method_id TEXT NOT NULL,
     split_mode TEXT NOT NULL DEFAULT 'equal',
     split_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
+    split_member_ids JSONB,
     custom_weights JSONB,
     pair_member_ids JSONB,
     notes TEXT,
@@ -158,6 +159,7 @@ ALTER TABLE public.household_expenses ADD COLUMN IF NOT EXISTS payer_id TEXT NOT
 ALTER TABLE public.household_expenses ADD COLUMN IF NOT EXISTS payment_method_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE public.household_expenses ADD COLUMN IF NOT EXISTS split_mode TEXT NOT NULL DEFAULT 'equal';
 ALTER TABLE public.household_expenses ADD COLUMN IF NOT EXISTS split_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE public.household_expenses ADD COLUMN IF NOT EXISTS split_member_ids JSONB;
 ALTER TABLE public.household_expenses ADD COLUMN IF NOT EXISTS custom_weights JSONB;
 ALTER TABLE public.household_expenses ADD COLUMN IF NOT EXISTS pair_member_ids JSONB;
 ALTER TABLE public.household_expenses ADD COLUMN IF NOT EXISTS notes TEXT;
